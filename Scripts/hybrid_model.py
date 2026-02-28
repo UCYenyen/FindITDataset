@@ -64,6 +64,8 @@ features = ['Avg_Temp', 'Rainfall', 'Is_Weekend', 'Lag_1', 'Lag_7']
 
 X_train = train_df[features]
 y_train_res = train_df['Residual']
+X_val = val_df[features]
+y_val_res = val_df['Residual']
 X_test = test_df[features]
 y_test_res = test_df['Residual']
 
@@ -78,17 +80,21 @@ model_lgb.fit(X_train, y_train_res)
 
 # Predict Residuals
 train_df['LGBM_Residual_Pred'] = model_lgb.predict(X_train)
+val_df['LGBM_Residual_Pred'] = model_lgb.predict(X_val)
 test_df['LGBM_Residual_Pred'] = model_lgb.predict(X_test)
 
 # Final Prediction = Prophet Trend + LGBM Residual Pattern
 train_df['Final_Pred'] = train_df['Prophet_Pred'] + train_df['LGBM_Residual_Pred']
+val_df['Final_Pred'] = val_df['Prophet_Pred'] + val_df['LGBM_Residual_Pred']
 test_df['Final_Pred'] = test_df['Prophet_Pred'] + test_df['LGBM_Residual_Pred']
 
 print("5. Evaluating Hybrid Model Performance...")
-mae = mean_absolute_error(test_df['Demand_MWh'], test_df['Final_Pred'])
-rmse = np.sqrt(mean_squared_error(test_df['Demand_MWh'], test_df['Final_Pred']))
-print(f"Hybrid Model MAE : {mae:.2f} MWh")
-print(f"Hybrid Model RMSE: {rmse:.2f} MWh")
+mae_val = mean_absolute_error(val_df['Demand_MWh'], val_df['Final_Pred'])
+rmse_val = np.sqrt(mean_squared_error(val_df['Demand_MWh'], val_df['Final_Pred']))
+mae_test = mean_absolute_error(test_df['Demand_MWh'], test_df['Final_Pred'])
+rmse_test = np.sqrt(mean_squared_error(test_df['Demand_MWh'], test_df['Final_Pred']))
+print(f"Validation MAE : {mae_val:.2f} MWh | RMSE: {rmse_val:.2f} MWh")
+print(f"Test MAE       : {mae_test:.2f} MWh | RMSE: {rmse_test:.2f} MWh")
 
 print("6. Training Isolation Forest (Anomaly Detection)...")
 # Detect extreme unexplainable power shifts
@@ -100,9 +106,10 @@ print(f"Total Anomalies Detected: {anomalies_count} days")
 """
 Uncomment the section below to generate SHAP Plots
 """
-# print("7. Generating XAI SHAP Explanation...")
-# explainer = shap.TreeExplainer(model_lgb)
-# shap_values = explainer.shap_values(X_test)
-# shap.summary_plot(shap_values, X_test, feature_names=features)
+
+print("7. Generating XAI SHAP Explanation...")
+explainer = shap.TreeExplainer(model_lgb)
+shap_values = explainer.shap_values(X_test)
+shap.summary_plot(shap_values, X_test, feature_names=features)
 
 print("SUCCESS! Hybrid Architecture Execution Completed.")
