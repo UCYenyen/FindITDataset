@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from prophet import Prophet
-import lightgbm as lgb
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.ensemble import IsolationForest
 import shap
@@ -11,7 +11,7 @@ warnings.filterwarnings('ignore')
 
 print("1. Loading Daily electricity dataset...")
 # Load Daily Dataset
-df = pd.read_csv('../Outputs/dataset_daily_processed.csv')
+df = pd.read_csv('Outputs/dataset_daily_processed.csv')
 df['Date'] = pd.to_datetime(df['Date'])
 
 # Create Prophet Holidays DataFrame
@@ -23,14 +23,19 @@ holidays_df = pd.DataFrame({
     'upper_window': 1,
 })
 
-print("2. Splitting Train and Test Sets (80/20 Time-Series Split)...")
-# Time series split: 80% train, 20% test
-split_index = int(len(df) * 0.8)
-train_df = df.iloc[:split_index].copy()
-test_df = df.iloc[split_index:].copy()
+print("2. Splitting Train, Validation, and Test Sets (70/15/15 Time-Series Split)...")
+# Time series split: 70% train, 15% validation, 15% test
+n = len(df)
+train_end = int(n * 0.70)
+val_end = int(n * 0.85)
+
+train_df = df.iloc[:train_end].copy()
+val_df = df.iloc[train_end:val_end].copy()
+test_df = df.iloc[val_end:].copy()
 
 # Prophet requires 'ds' (Date) and 'y' (Target)
 train_prophet = train_df[['Date', 'Demand_MWh']].rename(columns={'Date': 'ds', 'Demand_MWh': 'y'})
+val_prophet = val_df[['Date', 'Demand_MWh']].rename(columns={'Date': 'ds', 'Demand_MWh': 'y'})
 test_prophet = test_df[['Date', 'Demand_MWh']].rename(columns={'Date': 'ds', 'Demand_MWh': 'y'})
 
 print("3. Training Meta Prophet (Capturing Trend & Seasonality)...")
@@ -38,13 +43,17 @@ print("3. Training Meta Prophet (Capturing Trend & Seasonality)...")
 m = Prophet(holidays=holidays_df, yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
 m.fit(train_prophet)
 
-# Predict on Train and Test
+# Predict on Train, Val, and Test
 forecast_train = m.predict(train_prophet[['ds']])
+forecast_val = m.predict(val_prophet[['ds']])
 forecast_test = m.predict(test_prophet[['ds']])
 
 # Calculate Residuals (Actual - Prophet Predicted)
 train_df['Prophet_Pred'] = forecast_train['yhat'].values
 train_df['Residual'] = train_df['Demand_MWh'] - train_df['Prophet_Pred']
+
+val_df['Prophet_Pred'] = forecast_val['yhat'].values
+val_df['Residual'] = val_df['Demand_MWh'] - val_df['Prophet_Pred']
 
 test_df['Prophet_Pred'] = forecast_test['yhat'].values
 test_df['Residual'] = test_df['Demand_MWh'] - test_df['Prophet_Pred']
@@ -58,18 +67,14 @@ y_train_res = train_df['Residual']
 X_test = test_df[features]
 y_test_res = test_df['Residual']
 
-# LightGBM parameters
-lgb_train = lgb.Dataset(X_train, y_train_res)
-params = {
-    'objective': 'regression',
-    'metric': 'rmse',
-    'boosting_type': 'gbdt',
-    'learning_rate': 0.05,
-    'num_leaves': 31,
-    'verbose': -1
-}
-
-model_lgb = lgb.train(params, lgb_train, num_boost_round=100)
+# Train HistGradientBoostingRegressor (Scikit-Learn equivalent of LightGBM)
+model_lgb = HistGradientBoostingRegressor(
+    learning_rate=0.05,
+    max_leaf_nodes=31,
+    max_iter=100,
+    random_state=42
+)
+model_lgb.fit(X_train, y_train_res)
 
 # Predict Residuals
 train_df['LGBM_Residual_Pred'] = model_lgb.predict(X_train)
