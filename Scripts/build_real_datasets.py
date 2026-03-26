@@ -10,7 +10,7 @@ dataset_dir = '/Users/bryanfernandodinata/Downloads/Dataset'
 
 print("1. Parsing BPS Yearly PLN Electricity...")
 # Gather all Listrik yang Didistribusikan... for yearly demand
-yearly_files = glob.glob(f'{dataset_dir}/Listrik yang Didistribusikan Menurut Provinsi (GWh), *.csv')
+yearly_files = glob.glob(f'{dataset_dir}/Raw Data/BPS_Electricity/Listrik yang Didistribusikan Menurut Provinsi (GWh), *.csv')
 yearly_demand = {}
 for y_file in yearly_files:
     year_str = os.path.basename(y_file).split(', ')[-1].replace('.csv', '')
@@ -35,7 +35,7 @@ for y in range(2018, 2024):
 print(f"Yearly Demand (GWh): {yearly_demand}")
 
 print("2. Parsing Makroekonomi...")
-df_macro = pd.read_csv(f'{dataset_dir}/API_IDN_DS2_en_csv_v2_8804.csv', skiprows=4)
+df_macro = pd.read_csv(f'{dataset_dir}/Raw Data/World_Bank_Macro/API_IDN_DS2_en_csv_v2_8804.csv', skiprows=4)
 ind_gdp = df_macro[df_macro['Indicator Code'] == 'NY.GDP.MKTP.CD']
 ind_pop = df_macro[df_macro['Indicator Code'] == 'SP.POP.TOTL']
 
@@ -48,7 +48,7 @@ for y in range(2018, 2024):
     }
 
 print("3. Parsing Kaggle Climate Data & BMKG Holidays...")
-df_climate = pd.read_csv(f'{dataset_dir}/climate_data.csv')
+df_climate = pd.read_csv(f'{dataset_dir}/Raw Data/Kaggle_Climate/climate_data.csv')
 df_climate['date'] = pd.to_datetime(df_climate['date'], format='%d-%m-%Y', errors='coerce')
 df_climate = df_climate.dropna(subset=['date'])
 
@@ -59,7 +59,7 @@ df_climate_daily.rename(columns={'date': 'Date', 'Tavg': 'Avg_Temp', 'RR': 'Rain
 # Parse JSON Holidays from Guangrei repo
 holidays_list = []
 try:
-    with open(f'{dataset_dir}/Json-Indonesia-holidays/api.json', 'r') as f:
+    with open(f'{dataset_dir}/Raw Data/Kaggle_Climate/Json-Indonesia-holidays/api.json', 'r') as f:
         holiday_data = json.load(f)
     for k, v in holiday_data.items():
         if isinstance(v, dict) and v.get('libur', False):
@@ -94,12 +94,28 @@ df_daily.loc[df_daily['Is_Holiday'] == 1, 'Daily_Weight'] -= 0.3
 # Hotter days map to higher demand
 df_daily['Daily_Weight'] += (df_daily['Avg_Temp'] - 27) * 0.05
 
+# === STOCHASTIC NOISE: break deterministic feature->target link ===
+# Without noise, Demand_MWh is a pure function of (Is_Weekend, Is_Holiday, Avg_Temp),
+# which causes target leakage — the model reverse-engineers the formula instead of
+# learning real consumption patterns.
+np.random.seed(42)
+
 all_days = []
 for y in range(2018, 2024):
     df_y = df_daily[df_daily['Year'] == y].copy()
     total_weight = df_y['Daily_Weight'].sum()
     yearly_MWh = yearly_demand[y] * 1000 # GWh to MWh
-    df_y['Demand_MWh'] = (df_y['Daily_Weight'] / total_weight) * yearly_MWh
+    base_demand = (df_y['Daily_Weight'] / total_weight) * yearly_MWh
+
+    # 1. Multiplicative noise: ±5% day-to-day volatility
+    #    Simulates unmeasured factors (industrial activity, random AC usage, etc.)
+    daily_noise_pct = np.random.normal(0, 0.05, size=len(df_y))
+
+    # 2. Additive Gaussian noise: ~3% of mean daily demand
+    #    Simulates measurement error and baseline uncertainty
+    additive_noise = np.random.normal(0, base_demand.mean() * 0.03, size=len(df_y))
+
+    df_y['Demand_MWh'] = base_demand * (1 + daily_noise_pct) + additive_noise
     all_days.append(df_y)
 
 df_daily = pd.concat(all_days)
@@ -112,7 +128,7 @@ df_daily['Rolling_7'] = df_daily['Demand_MWh'].rolling(window=7, min_periods=1).
 
 daily_cols = ['Date', 'Demand_MWh', 'Day_of_Week', 'Is_Weekend', 'Is_Holiday', 'Avg_Temp', 'Rainfall', 'Lag_1', 'Lag_7', 'Lag_30', 'Rolling_7']
 df_daily_out = df_daily[daily_cols].iloc[30:].reset_index(drop=True)
-df_daily_out.to_csv(f'{dataset_dir}/dataset_daily_processed.csv', index=False)
+df_daily_out.to_csv(f'{dataset_dir}/Outputs/dataset_daily_processed.csv', index=False)
 
 # CREATE MONTHLY FRAMEWORK
 df_daily['Month'] = df_daily['Date'].dt.month
@@ -139,6 +155,6 @@ df_monthly['Rolling_12'] = df_monthly['Demand_GWh'].rolling(window=12, min_perio
 
 monthly_cols = ['Year', 'Month', 'Demand_GWh', 'GDP', 'Population', 'Industrial_Index', 'Avg_Temp', 'Lag_1', 'Lag_12', 'Rolling_12']
 df_monthly_out = df_monthly[monthly_cols].iloc[12:].reset_index(drop=True)
-df_monthly_out.to_csv(f'{dataset_dir}/dataset_monthly_processed.csv', index=False)
+df_monthly_out.to_csv(f'{dataset_dir}/Outputs/dataset_monthly_processed.csv', index=False)
 
 print("SUCCESS! Final 100% mapped real datasets saved.")
