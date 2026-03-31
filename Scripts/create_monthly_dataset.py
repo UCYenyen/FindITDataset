@@ -1,8 +1,16 @@
 import pandas as pd
 import numpy as np
+import os
+
+# Resolve paths relative to this script's location
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.join(SCRIPT_DIR, '..')
+
+doc_dir = os.path.join(PROJECT_ROOT, 'Documentation')
+output_dir = os.path.join(PROJECT_ROOT, 'Outputs')
 
 # Load raw monthly data
-df_raw = pd.read_csv('/Users/bryanfernandodinata/Downloads/Dataset/monthly_full_release_long_format.csv')
+df_raw = pd.read_csv(os.path.join(doc_dir, 'monthly_full_release_long_format.csv'))
 
 # Filter for Indonesia and Electricity Demand
 df_indo = df_raw[(df_raw['Area'] == 'Indonesia') & (df_raw['Category'] == 'Electricity demand') & (df_raw['Subcategory'] == 'Demand')]
@@ -40,7 +48,7 @@ df_monthly['Lag_12'] = df_monthly['Demand_GWh'].shift(12)
 df_monthly['Rolling_12'] = df_monthly['Demand_GWh'].rolling(window=12).mean()
 
 # Save Monthly Dataset
-monthly_output_path = '/Users/bryanfernandodinata/Downloads/Dataset/dataset_monthly_processed.csv'
+monthly_output_path = os.path.join(output_dir, 'dataset_monthly_processed.csv')
 df_monthly.to_csv(monthly_output_path, index=False)
 print(f"Monthly dataset saved to: {monthly_output_path}")
 print(df_monthly.head(15))

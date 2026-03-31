@@ -1,14 +1,23 @@
 import pandas as pd
 import numpy as np
 import warnings
+import os
 warnings.filterwarnings('ignore')
+
+# Resolve paths relative to this script's location
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.join(SCRIPT_DIR, '..')
+
+raw_data_dir = os.path.join(PROJECT_ROOT, 'Raw Data')
+output_dir = os.path.join(PROJECT_ROOT, 'Outputs')
+doc_dir = os.path.join(PROJECT_ROOT, 'Documentation')
 
 print("Loading raw data...")
 # Load raw monthly generation data
-df_raw = pd.read_csv('/Users/bryanfernandodinata/Downloads/Dataset/monthly_full_release_long_format.csv')
+df_raw = pd.read_csv(os.path.join(doc_dir, 'monthly_full_release_long_format.csv'))
 
 # Load Macroeconomic data (World Bank API)
-df_macro = pd.read_csv('/Users/bryanfernandodinata/Downloads/Dataset/API_IDN_DS2_en_csv_v2_8804.csv', skiprows=4)
+df_macro = pd.read_csv(os.path.join(raw_data_dir, 'World_Bank_Macro', 'API_IDN_DS2_en_csv_v2_8804.csv'), skiprows=4)
 # Filter for specific indicators
 ind_gdp = df_macro[df_macro['Indicator Code'] == 'NY.GDP.MKTP.CD']
 ind_pop = df_macro[df_macro['Indicator Code'] == 'SP.POP.TOTL']
@@ -68,7 +77,7 @@ df_monthly = df_monthly[monthly_cols]
 # Drop NaNs from shifts to keep data clean
 df_monthly = df_monthly.iloc[12:].reset_index(drop=True)
 
-monthly_output_path = '/Users/bryanfernandodinata/Downloads/Dataset/dataset_monthly_processed.csv'
+monthly_output_path = os.path.join(output_dir, 'dataset_monthly_processed.csv')
 df_monthly.to_csv(monthly_output_path, index=False)
 print(f"✅ Real Country Macroeconomics Integrated. Monthly dataset updated: {monthly_output_path}")
 
@@ -109,6 +118,6 @@ daily_cols = ['Date', 'Demand_MWh', 'Day_of_Week', 'Is_Weekend', 'Is_Holiday', '
 df_daily = df_daily[daily_cols]
 df_daily = df_daily.iloc[30:].reset_index(drop=True)
 
-daily_output_path = '/Users/bryanfernandodinata/Downloads/Dataset/dataset_daily_processed.csv'
+daily_output_path = os.path.join(output_dir, 'dataset_daily_processed.csv')
 df_daily.to_csv(daily_output_path, index=False)
 print(f"✅ Daily dataset updated: {daily_output_path}")

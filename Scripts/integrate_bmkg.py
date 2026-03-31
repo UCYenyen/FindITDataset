@@ -2,14 +2,22 @@ import json
 import pandas as pd
 import numpy as np
 import warnings
+import os
 warnings.filterwarnings('ignore')
+
+# Resolve paths relative to this script's location
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.join(SCRIPT_DIR, '..')
+
+raw_data_dir = os.path.join(PROJECT_ROOT, 'Raw Data')
+output_dir = os.path.join(PROJECT_ROOT, 'Outputs')
 
 print("Starting BMKG Weather integration...")
 
 # 1. Parse BMKG Weather Data
 # The BMKG repository mainly contains forecast data for specific days in JSON format.
 # Let's extract the temperature and rainfall array from `31.71.01.1001.json` (Jakarta Pusat as a proxy for Indonesia's central weather or replacing noise)
-bmkg_file = '/Users/bryanfernandodinata/Downloads/Dataset/data-cuaca/31.71.01.1001.json'
+bmkg_file = os.path.join(raw_data_dir, 'Kaggle_Climate', 'data-cuaca', '31.71.01.1001.json')
 
 weather_records = []
 try:
@@ -31,11 +39,11 @@ try:
     print(f"BMKG Extracted {len(df_bmkg_daily)} days of real weather data from JSON.")
     
 except Exception as e:
-    print(f"Error parsing BMKG JSON: {e}")
+    print(f"Warning: BMKG JSON not available ({e}). Skipping BMKG integration.")
     df_bmkg_daily = pd.DataFrame(columns=['Date', 'Temp', 'Rain'])
 
 # 2. Update the Daily Dataset
-dataset_daily_path = '/Users/bryanfernandodinata/Downloads/Dataset/dataset_daily_processed.csv'
+dataset_daily_path = os.path.join(output_dir, 'dataset_daily_processed.csv')
 df_daily = pd.read_csv(dataset_daily_path)
 df_daily['Date'] = pd.to_datetime(df_daily['Date'])
 
@@ -70,7 +78,7 @@ print(f"✅ Real BMKG Weather Data integrated. Dataset updated: {dataset_daily_p
 
 
 # 3. Update the Monthly Dataset Weather feature based on the new aggregated Daily Weather
-dataset_monthly_path = '/Users/bryanfernandodinata/Downloads/Dataset/dataset_monthly_processed.csv'
+dataset_monthly_path = os.path.join(output_dir, 'dataset_monthly_processed.csv')
 df_monthly = pd.read_csv(dataset_monthly_path)
 
 # Aggregate daily weather to monthly to update the monthly dataset
