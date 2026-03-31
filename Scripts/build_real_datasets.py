@@ -102,12 +102,28 @@ df_daily.loc[df_daily['Is_Holiday'] == 1, 'Daily_Weight'] -= 0.3
 # Hotter days map to higher demand
 df_daily['Daily_Weight'] += (df_daily['Avg_Temp'] - 27) * 0.05
 
+# === STOCHASTIC NOISE: break deterministic feature->target link ===
+# Without noise, Demand_MWh is a pure function of (Is_Weekend, Is_Holiday, Avg_Temp),
+# which causes target leakage — the model reverse-engineers the formula instead of
+# learning real consumption patterns.
+np.random.seed(42)
+
 all_days = []
 for y in range(2018, 2024):
     df_y = df_daily[df_daily['Year'] == y].copy()
     total_weight = df_y['Daily_Weight'].sum()
     yearly_MWh = yearly_demand[y] * 1000 # GWh to MWh
-    df_y['Demand_MWh'] = (df_y['Daily_Weight'] / total_weight) * yearly_MWh
+    base_demand = (df_y['Daily_Weight'] / total_weight) * yearly_MWh
+
+    # 1. Multiplicative noise: ±5% day-to-day volatility
+    #    Simulates unmeasured factors (industrial activity, random AC usage, etc.)
+    daily_noise_pct = np.random.normal(0, 0.05, size=len(df_y))
+
+    # 2. Additive Gaussian noise: ~3% of mean daily demand
+    #    Simulates measurement error and baseline uncertainty
+    additive_noise = np.random.normal(0, base_demand.mean() * 0.03, size=len(df_y))
+
+    df_y['Demand_MWh'] = base_demand * (1 + daily_noise_pct) + additive_noise
     all_days.append(df_y)
 
 df_daily = pd.concat(all_days)

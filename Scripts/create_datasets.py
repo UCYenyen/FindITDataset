@@ -90,7 +90,7 @@ df_daily = pd.DataFrame({'Date': date_rng_daily})
 base_demand = 800
 yearly_growth_trend = np.linspace(0, 100, len(date_rng_daily))
 seasonal_variation = np.sin(np.linspace(0, 12 * 2 * np.pi, len(date_rng_daily))) * 50
-noise = np.random.normal(0, 20, len(date_rng_daily))
+noise = np.random.normal(0, 40, len(date_rng_daily))  # ~5% of base demand
 
 df_daily['Demand_MWh'] = base_demand + yearly_growth_trend + seasonal_variation + noise
 df_daily['Day_of_Week'] = df_daily['Date'].dt.dayofweek
@@ -101,8 +101,11 @@ holiday_indices = np.random.choice(df_daily.index, size=60, replace=False)
 df_daily['Is_Holiday'] = 0
 df_daily.loc[holiday_indices, 'Is_Holiday'] = 1
 
-df_daily.loc[df_daily['Is_Weekend'] == 1, 'Demand_MWh'] -= 100
-df_daily.loc[df_daily['Is_Holiday'] == 1, 'Demand_MWh'] -= 120
+# Randomized penalties instead of exact constants to avoid deterministic leakage
+weekend_mask = df_daily['Is_Weekend'] == 1
+holiday_mask = df_daily['Is_Holiday'] == 1
+df_daily.loc[weekend_mask, 'Demand_MWh'] -= np.random.normal(100, 30, weekend_mask.sum())
+df_daily.loc[holiday_mask, 'Demand_MWh'] -= np.random.normal(120, 35, holiday_mask.sum())
 
 df_daily['Avg_Temp'] = 27 + np.sin(np.linspace(0, 12 * 2 * np.pi, len(date_rng_daily))) * 2 + np.random.normal(0, 1, len(date_rng_daily))
 df_daily['Rainfall'] = np.random.exponential(scale=5, size=len(date_rng_daily))
