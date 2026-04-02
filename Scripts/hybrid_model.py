@@ -1,4 +1,5 @@
 import os
+import json
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -24,6 +25,13 @@ PROJECT_ROOT = os.path.join(SCRIPT_DIR, '..')
 output_dir = os.path.join(PROJECT_ROOT, 'Outputs')
 models_dir = os.path.join(PROJECT_ROOT, 'Models')
 os.makedirs(models_dir, exist_ok=True)
+
+params_path = os.path.join(models_dir, 'best_hybrid_params.json')
+
+# Tuning control (can be overridden from environment variables)
+OPTUNA_TRIALS = int(os.getenv('OPTUNA_TRIALS', '30'))
+RETUNE_EVERY_DAYS = int(os.getenv('RETUNE_EVERY_DAYS', '30'))
+FORCE_RETUNE = os.getenv('FORCE_RETUNE', '0') == '1'
 
 print("1. Loading Daily electricity dataset...")
 # Load Daily Dataset
@@ -57,6 +65,58 @@ train_df = df.iloc[:train_end].copy()
 val_df = df.iloc[train_end:val_end].copy()
 test_df = df.iloc[val_end:].copy()
 print(f"   Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
+
+required_param_keys = {
+    'contamination',
+    'changepoint_prior_scale',
+    'seasonality_prior_scale',
+    'learning_rate',
+    'max_depth',
+    'num_leaves',
+    'subsample',
+    'colsample_bytree',
+}
+
+def load_saved_params(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        params = payload.get('best_params', payload)
+        if not isinstance(params, dict):
+            return None
+        if not required_param_keys.issubset(set(params.keys())):
+            return None
+        return payload
+    except Exception as e:
+        print(f"   Warning: failed to read saved params ({e}).")
+        return None
+
+def should_retune(saved_payload):
+    if FORCE_RETUNE:
+        print("   Retune reason: FORCE_RETUNE=1")
+        return True
+    if saved_payload is None:
+        print("   Retune reason: no saved parameter file found.")
+        return True
+
+    tuned_at = saved_payload.get('last_tuned_at')
+    if not tuned_at:
+        print("   Retune reason: missing last_tuned_at metadata.")
+        return True
+
+    try:
+        tuned_ts = pd.to_datetime(tuned_at)
+        age_days = (pd.Timestamp.now() - tuned_ts).days
+        if age_days >= RETUNE_EVERY_DAYS:
+            print(f"   Retune reason: params age {age_days} days >= {RETUNE_EVERY_DAYS} days.")
+            return True
+        print(f"   Using saved params (age: {age_days} days, retune threshold: {RETUNE_EVERY_DAYS} days).")
+        return False
+    except Exception:
+        print("   Retune reason: invalid last_tuned_at format.")
+        return True
 
 # ============================================================
 # STEP 3.5 & 4: JOINT BAYESIAN OPTIMIZATION (OPTUNA)
@@ -135,15 +195,31 @@ def objective(trial):
     
     return mean_absolute_error(temp_val[target_col], hybrid_preds)
 
-print("   Running Joint Bayesian Search (30 Trials)...")
-sampler = optuna.samplers.TPESampler(seed=0)
-study = optuna.create_study(direction='minimize', sampler=sampler)
-study.optimize(objective, n_trials=30, show_progress_bar=False)
+saved_payload = load_saved_params(params_path)
 
-print(f"   Best Joint Parameters found: {study.best_params}")
+if should_retune(saved_payload):
+    print(f"   Running Joint Bayesian Search ({OPTUNA_TRIALS} Trials)...")
+    sampler = optuna.samplers.TPESampler(seed=0)
+    study = optuna.create_study(direction='minimize', sampler=sampler)
+    study.optimize(objective, n_trials=OPTUNA_TRIALS, show_progress_bar=False)
 
-# Extract Champion Parameters
-best_p = study.best_params
+    best_p = study.best_params
+    print(f"   Best Joint Parameters found: {best_p}")
+
+    params_payload = {
+        'best_params': best_p,
+        'last_tuned_at': pd.Timestamp.now().isoformat(),
+        'n_trials': OPTUNA_TRIALS,
+        'retune_every_days': RETUNE_EVERY_DAYS,
+        'target_col': target_col,
+        'features': features,
+    }
+    with open(params_path, 'w', encoding='utf-8') as f:
+        json.dump(params_payload, f, indent=2)
+    print(f"   Saved best parameters to: {params_path}")
+else:
+    best_p = saved_payload['best_params']
+    print(f"   Loaded saved best parameters from: {params_path}")
 
 # ============================================================
 # FINAL ARCHITECTURE TRAINING
