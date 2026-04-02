@@ -15,26 +15,45 @@ st.markdown("*Hybrid Architecture: Prophet (Baseline) + LightGBM (Residuals) + I
 script_dir = os.path.dirname(os.path.abspath(__file__))
 models_dir = os.path.join(script_dir, 'Models')
 data_path = os.path.join(script_dir, 'Outputs', 'dataset_daily_with_predictions.csv')
+xai_candidates = [
+    os.path.join(script_dir, 'Outputs', 'fig4_shap_summary.png'),
+    os.path.join(script_dir, 'output_xai.png'),
+]
 
 @st.cache_resource
-def load_models():
+def load_models(_prophet_mtime, _lgbm_mtime, _iso_mtime):
     prophet_model = joblib.load(os.path.join(models_dir, 'prophet_model.joblib'))
     lgbm_model = joblib.load(os.path.join(models_dir, 'lgbm_model.joblib'))
     iso_forest = joblib.load(os.path.join(models_dir, 'iso_forest.joblib'))
     return prophet_model, lgbm_model, iso_forest
 
 @st.cache_data
-def load_and_prep_data():
+def load_and_prep_data(_data_mtime):
     df = pd.read_csv(data_path)
     df['Date'] = pd.to_datetime(df['Date'])
     return df
 
 try:
-    prophet_model, lgbm_model, iso_forest = load_models()
-    df = load_and_prep_data()
+    prophet_path = os.path.join(models_dir, 'prophet_model.joblib')
+    lgbm_path = os.path.join(models_dir, 'lgbm_model.joblib')
+    iso_path = os.path.join(models_dir, 'iso_forest.joblib')
+
+    prophet_model, lgbm_model, iso_forest = load_models(
+        os.path.getmtime(prophet_path),
+        os.path.getmtime(lgbm_path),
+        os.path.getmtime(iso_path),
+    )
+    data_mtime = os.path.getmtime(data_path)
+    df = load_and_prep_data(data_mtime)
 except FileNotFoundError as e:
     st.error(f"Missing required file: {e}. Please run `Scripts/hybrid_model.py` first.")
     st.stop()
+
+st.caption(
+    "Loaded artifacts: "
+    f"data={pd.to_datetime(data_mtime, unit='s'):%Y-%m-%d %H:%M:%S}, "
+    f"models={pd.to_datetime(max(os.path.getmtime(prophet_path), os.path.getmtime(lgbm_path), os.path.getmtime(iso_path)), unit='s'):%Y-%m-%d %H:%M:%S}"
+)
 
 # Features must match what the model was trained on (daily dataset only, no macro columns)
 model_features = [
@@ -99,11 +118,11 @@ with tab1:
         st.pyplot(fig_prophet)
     with col_b:
         st.subheader("Global Feature Impact")
-        xai_path = os.path.join(script_dir, "output_xai.png")
-        if os.path.exists(xai_path):
+        xai_path = next((path for path in xai_candidates if os.path.exists(path)), None)
+        if xai_path:
             st.image(xai_path, use_container_width=True)
         else:
-            st.info("No output_xai.png found. Run hybrid_model.py to generate it.")
+            st.info("No XAI figure found. Run Scripts/hybrid_model.py to generate Outputs/fig4_shap_summary.png.")
 
 with tab2:
     st.header("Prediksi Masa Depan & Penjelasan Keputusan (Local XAI)")
