@@ -101,6 +101,9 @@ with tab1:
     total_rows = len(df_clean)
     anomaly_count = len(anomalies)
     anomaly_ratio = (anomaly_count / total_rows * 100) if total_rows else 0.0
+    period_start = df_clean['Date'].min()
+    period_end = df_clean['Date'].max()
+    period_days = (period_end - period_start).days + 1 if total_rows else 0
 
     actual_hist = df_clean['Demand_MWh']
     hybrid_hist = df_clean['Hybrid_Prediction']
@@ -141,11 +144,15 @@ with tab1:
     )
 
     kpi_1, kpi_2, kpi_3, kpi_4, kpi_5 = st.columns(5)
-    kpi_1.metric("Periode Data", f"{df_clean['Date'].min():%Y-%m-%d} s/d {df_clean['Date'].max():%Y-%m-%d}")
+    kpi_1.metric("Periode Data", f"{period_days:,} hari")
     kpi_2.metric("Jumlah Observasi", f"{total_rows:,}")
     kpi_3.metric("Anomali Terdeteksi", f"{anomaly_count:,}", delta=f"{anomaly_ratio:.2f}% dari data")
     kpi_4.metric("MAE Hybrid", f"{mae_hybrid:,.0f} MWh")
     kpi_5.metric("RMSE Hybrid", f"{rmse_hybrid:,.0f} MWh")
+
+    st.markdown(
+        f"**Rentang tanggal historis:** {period_start:%d %b %Y} -> {period_end:%d %b %Y}"
+    )
 
     st.caption(
         f"MAPE Hybrid historis: {mape_hybrid:.2f}%"
