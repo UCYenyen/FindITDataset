@@ -98,6 +98,64 @@ with tab1:
     st.header("1. System Validation & Anomaly Detection")
     anomalies = df_clean[df_clean['Anomaly_Score'] == -1]
 
+    total_rows = len(df_clean)
+    anomaly_count = len(anomalies)
+    anomaly_ratio = (anomaly_count / total_rows * 100) if total_rows else 0.0
+
+    actual_hist = df_clean['Demand_MWh']
+    hybrid_hist = df_clean['Hybrid_Prediction']
+    abs_err_hybrid = (actual_hist - hybrid_hist).abs()
+    mae_hybrid = abs_err_hybrid.mean()
+    rmse_hybrid = ((actual_hist - hybrid_hist) ** 2).mean() ** 0.5
+    non_zero_mask = actual_hist != 0
+    mape_hybrid = ((abs_err_hybrid[non_zero_mask] / actual_hist[non_zero_mask]).mean() * 100) if non_zero_mask.any() else float('nan')
+
+    has_prophet_pred = 'Prophet_Pred' in df_clean.columns
+    if has_prophet_pred:
+        prophet_hist = df_clean['Prophet_Pred']
+        abs_err_prophet = (actual_hist - prophet_hist).abs()
+        mae_prophet = abs_err_prophet.mean()
+        rmse_prophet = ((actual_hist - prophet_hist) ** 2).mean() ** 0.5
+        mape_prophet = ((abs_err_prophet[non_zero_mask] / actual_hist[non_zero_mask]).mean() * 100) if non_zero_mask.any() else float('nan')
+
+        rmse_gain = ((rmse_prophet - rmse_hybrid) / rmse_prophet * 100) if rmse_prophet != 0 else 0.0
+        mae_gain = ((mae_prophet - mae_hybrid) / mae_prophet * 100) if mae_prophet != 0 else 0.0
+    else:
+        rmse_gain = None
+        mae_gain = None
+
+    st.markdown(
+        """
+        **Tujuan panel historis ini** adalah mengevaluasi apakah sistem bekerja stabil pada data harian aktual.
+
+        Arsitektur yang divalidasi:
+        1. **Prophet** memodelkan pola utama jangka panjang (tren + musiman).
+        2. **LightGBM** mengoreksi residual Prophet menggunakan variabel eksogen/cuaca + fitur lag.
+        3. **Isolation Forest** menandai hari dengan pola fitur yang sangat tidak lazim sebagai anomali.
+
+        Hasil yang perlu diperhatikan:
+        - Seberapa dekat garis prediksi ke demand aktual.
+        - Seberapa sering muncul anomali relatif terhadap total hari.
+        - Seberapa besar error historis (MAE, RMSE, MAPE).
+        """
+    )
+
+    kpi_1, kpi_2, kpi_3, kpi_4, kpi_5 = st.columns(5)
+    kpi_1.metric("Periode Data", f"{df_clean['Date'].min():%Y-%m-%d} s/d {df_clean['Date'].max():%Y-%m-%d}")
+    kpi_2.metric("Jumlah Observasi", f"{total_rows:,}")
+    kpi_3.metric("Anomali Terdeteksi", f"{anomaly_count:,}", delta=f"{anomaly_ratio:.2f}% dari data")
+    kpi_4.metric("MAE Hybrid", f"{mae_hybrid:,.0f} MWh")
+    kpi_5.metric("RMSE Hybrid", f"{rmse_hybrid:,.0f} MWh")
+
+    st.caption(
+        f"MAPE Hybrid historis: {mape_hybrid:.2f}%"
+        + (
+            f" | Gain vs Prophet: MAE {mae_gain:.2f}%, RMSE {rmse_gain:.2f}%"
+            if has_prophet_pred else
+            " | Kolom Prophet_Pred tidak tersedia, sehingga perbandingan baseline Prophet tidak ditampilkan."
+        )
+    )
+
     fig_main = go.Figure()
     fig_main.add_trace(go.Scatter(x=df_clean['Date'], y=df_clean['Demand_MWh'], mode='lines', name='Actual Demand', line=dict(color='blue')))
     fig_main.add_trace(go.Scatter(x=df_clean['Date'], y=df_clean['Hybrid_Prediction'], mode='lines', name='Hybrid Prediction', line=dict(color='orange', dash='dash')))
@@ -108,6 +166,20 @@ with tab1:
     ))
     fig_main.update_layout(height=400, template='plotly_white', hovermode='x unified')
     st.plotly_chart(fig_main, use_container_width=True)
+
+    with st.expander("Cara membaca grafik utama (Actual vs Hybrid + Anomali)", expanded=True):
+        st.markdown(
+            """
+            1. **Garis biru (Actual Demand)** adalah beban listrik aktual harian.
+            2. **Garis oranye putus-putus (Hybrid Prediction)** adalah hasil prediksi sistem hybrid.
+            3. **Marker merah (Grid Anomaly Detected)** adalah hari yang oleh Isolation Forest dianggap tidak normal secara pola fitur.
+
+            Interpretasi praktis:
+            - Jika garis oranye menempel pada garis biru, model memiliki error rendah.
+            - Jika marker merah muncul berkelompok, kemungkinan ada kejadian sistemik (event besar, gangguan, cuaca ekstrem, atau perubahan pola konsumsi).
+            - Tidak semua anomali adalah kesalahan data; sebagian bisa menjadi sinyal operasional penting untuk investigasi.
+            """
+        )
     
     col_a, col_b = st.columns(2)
     with col_a:
@@ -116,13 +188,56 @@ with tab1:
         forecast = prophet_model.predict(df_prophet)
         fig_prophet = prophet_model.plot_components(forecast)
         st.pyplot(fig_prophet)
+        with st.expander("Penjelasan Prophet Components", expanded=False):
+            st.markdown(
+                """
+                Plot komponen Prophet menjelaskan dari mana baseline terbentuk:
+                1. **Trend**: arah pertumbuhan/penurunan demand jangka panjang.
+                2. **Weekly Seasonality**: pola berulang per hari dalam seminggu (hari kerja vs akhir pekan).
+                3. **Yearly Seasonality**: pola musiman tahunan.
+
+                Komponen ini belum memuat koreksi residual LightGBM, sehingga dipakai sebagai baseline struktural.
+                """
+            )
     with col_b:
         st.subheader("Global Feature Impact")
         xai_path = next((path for path in xai_candidates if os.path.exists(path)), None)
         if xai_path:
             st.image(xai_path, use_container_width=True)
+            with st.expander("Penjelasan Global Feature Impact (SHAP)", expanded=False):
+                st.markdown(
+                    """
+                    Grafik SHAP global merangkum kontribusi fitur terhadap koreksi residual LightGBM.
+
+                    Cara membaca:
+                    1. **Sumbu Y**: urutan fitur dari paling berpengaruh ke paling kecil.
+                    2. **Sumbu X (SHAP value)**:
+                       - Nilai positif mendorong prediksi naik.
+                       - Nilai negatif mendorong prediksi turun.
+                    3. **Warna titik**:
+                       - Warna lebih "panas" menandakan nilai fitur tinggi.
+                       - Warna lebih "dingin" menandakan nilai fitur rendah.
+
+                    Nilai bisnis:
+                    - Mengidentifikasi pendorong demand utama (mis. suhu, lag konsumsi).
+                    - Membantu validasi bahwa perilaku model konsisten dengan logika sistem tenaga.
+                    """
+                )
         else:
             st.info("No XAI figure found. Run Scripts/hybrid_model.py to generate Outputs/fig4_shap_summary.png.")
+
+    with st.expander("Kesimpulan Validasi Historis", expanded=True):
+        st.markdown(
+            """
+            Checklist cepat sebelum model dipakai operasional:
+            1. **Akurasi**: MAE/RMSE/MAPE berada dalam batas toleransi operasional.
+            2. **Stabilitas pola**: prediksi tidak sering melenceng besar dari aktual.
+            3. **Anomali**: rasio anomali wajar dan dapat dijelaskan secara domain.
+            4. **Interpretabilitas**: fitur dominan SHAP masuk akal secara fisik/operasional.
+
+            Jika salah satu poin di atas tidak terpenuhi, lakukan retraining atau audit data (khususnya fitur lag, cuaca, dan label libur).
+            """
+        )
 
 with tab2:
     st.header("Prediksi Masa Depan & Penjelasan Keputusan (Local XAI)")
