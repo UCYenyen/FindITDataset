@@ -7,10 +7,14 @@ import matplotlib.pyplot as plt
 from prophet import Prophet
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 import lightgbm as lgb
 import shap
 import joblib
 import warnings
+import itertools
+from prophet.diagnostics import cross_validation, performance_metrics
+import logging
 warnings.filterwarnings('ignore')
 
 # Resolve paths relative to this script's location
@@ -55,39 +59,168 @@ test_df = df.iloc[val_end:].copy()
 print(f"   Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
 
 # ============================================================
-# STEP 4: HYBRID MODEL (Prophet Baseline + LightGBM Residuals)
+# STEP 3.5 & 4: JOINT BAYESIAN OPTIMIZATION (OPTUNA)
 # ============================================================
-print("4. Training Hybrid Model (Prophet + LightGBM)...")
+print("3.5 & 4: Joint Bayesian Optimization (Optuna)...")
+import optuna
+import logging
 
-# --- Prophet (captures trend + seasonality) ---
-df_prophet_train = train_df[['Date', target_col]].rename(columns={'Date': 'ds', target_col: 'y'})
-prophet_model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+logger = logging.getLogger('cmdstanpy')
+logger.addHandler(logging.NullHandler())
+logger.propagate = False
+logger.setLevel(logging.CRITICAL)
+
+df_prophet_val_proxy = val_df[['Date']].rename(columns={'Date': 'ds'})
+
+def objective(trial):
+    # 1. Suggest joint parameters
+    contamination = trial.suggest_float('contamination', 0.001, 0.05, log=True)
+    cps = trial.suggest_float('changepoint_prior_scale', 0.01, 0.5, log=True)
+    sps = trial.suggest_float('seasonality_prior_scale', 0.1, 10.0, log=True)
+    
+    lgb_lr = trial.suggest_float('learning_rate', 0.01, 0.1, log=True)
+    lgb_depth = trial.suggest_int('max_depth', 3, 7)
+    lgb_leaves = trial.suggest_int('num_leaves', 15, 63)
+    lgb_subsample = trial.suggest_float('subsample', 0.7, 1.0)
+    lgb_colsample = trial.suggest_float('colsample_bytree', 0.7, 1.0)
+    
+    # 2. Anomaly Cleaning
+    temp_forest = IsolationForest(n_estimators=100, max_samples='auto', contamination=contamination, random_state=42, n_jobs=-1)
+    temp_forest.fit(train_df[features])
+    temp_anomalies = temp_forest.predict(train_df[features])
+    
+    temp_train_clean = train_df[temp_anomalies != -1].copy()
+    if len(temp_train_clean) < len(train_df) * 0.5: # Failsafe
+        return float('inf')
+        
+    # 3. Base Prophet
+    df_prophet_temp = temp_train_clean[['Date', target_col]].rename(columns={'Date': 'ds', target_col: 'y'})
+    m_base = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False, changepoint_prior_scale=cps, seasonality_prior_scale=sps)
+    m_base.fit(df_prophet_temp)
+    
+    temp_train_clean['Prophet_Pred'] = m_base.predict(df_prophet_temp)['yhat'].values
+    preds_val_base = m_base.predict(df_prophet_val_proxy)['yhat'].values
+    
+    temp_val = val_df.copy()
+    temp_val['Prophet_Pred'] = preds_val_base
+    
+    # 4. Residual LightGBM
+    temp_train_clean['Prophet_Residual'] = temp_train_clean[target_col] - temp_train_clean['Prophet_Pred']
+    temp_val['Prophet_Residual'] = temp_val[target_col] - temp_val['Prophet_Pred']
+    
+    X_train_temp = temp_train_clean[features]
+    y_train_res_temp = temp_train_clean['Prophet_Residual']
+    X_val_temp = temp_val[features]
+    y_val_res_temp = temp_val['Prophet_Residual']
+    
+    lgb_model = lgb.LGBMRegressor(
+        learning_rate=lgb_lr, max_depth=lgb_depth, num_leaves=lgb_leaves, 
+        subsample=lgb_subsample, colsample_bytree=lgb_colsample,
+        n_estimators=1000, random_state=42, n_jobs=-1, verbose=-1
+    )
+    
+    lgb_model.fit(
+        X_train_temp, y_train_res_temp,
+        eval_set=[(X_val_temp, y_val_res_temp)],
+        callbacks=[
+            lgb.early_stopping(stopping_rounds=20, verbose=False),
+            lgb.log_evaluation(period=0)
+        ]
+    )
+    
+    preds_val_res = lgb_model.predict(X_val_temp)
+    hybrid_preds = temp_val['Prophet_Pred'] + preds_val_res
+    
+    return mean_absolute_error(temp_val[target_col], hybrid_preds)
+
+print("   Running Joint Bayesian Search (30 Trials)...")
+sampler = optuna.samplers.TPESampler(seed=0)
+study = optuna.create_study(direction='minimize', sampler=sampler)
+study.optimize(objective, n_trials=30, show_progress_bar=False)
+
+print(f"   Best Joint Parameters found: {study.best_params}")
+
+# Extract Champion Parameters
+best_p = study.best_params
+
+# ============================================================
+# FINAL ARCHITECTURE TRAINING
+# ============================================================
+print("   Training Final Champion Architecture...")
+
+# 1. Final Anomaly Cleaner
+iso_forest = IsolationForest(n_estimators=300, max_samples='auto', contamination=best_p['contamination'], random_state=42, n_jobs=-1)
+iso_forest.fit(train_df[features])
+
+train_anomalies = iso_forest.predict(train_df[features])
+train_df_clean = train_df[train_anomalies != -1].copy()
+print(f"   Built final clean dataset. Removed {len(train_df) - len(train_df_clean)} anomalies.")
+
+# Visualize Anomalies
+anomalous_data = train_df[train_anomalies == -1]
+normal_data = train_df[train_anomalies != -1]
+
+plt.figure(figsize=(15, 6))
+plt.plot(train_df['Date'], train_df[target_col], color='royalblue', label='Normal Demand', alpha=0.6, linewidth=1)
+plt.scatter(anomalous_data['Date'], anomalous_data[target_col], color='crimson', label='Detected Anomaly', zorder=5)
+plt.title('Isolation Forest: Detected Anomalies in Training Data')
+plt.xlabel('Date')
+plt.ylabel('Electricity Demand (MWh)')
+plt.legend()
+plt.tight_layout()
+anomaly_plot_path = os.path.join(output_dir, 'fig0_anomalies_detected.png')
+plt.savefig(anomaly_plot_path, dpi=300)
+plt.close()
+print(f"   Saved Anomaly Visualization: {anomaly_plot_path}")
+
+# 2. Final Prophet Training
+df_prophet_train = train_df_clean[['Date', target_col]].rename(columns={'Date': 'ds', target_col: 'y'})
+prophet_model = Prophet(
+    yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False,
+    changepoint_prior_scale=best_p['changepoint_prior_scale'], 
+    seasonality_prior_scale=best_p['seasonality_prior_scale']
+)
 prophet_model.fit(df_prophet_train)
 
-# Generate Prophet predictions for all splits
-for split_df in [train_df, val_df, test_df]:
+for split_df in [train_df_clean, train_df, val_df, test_df]:
     future = split_df[['Date']].rename(columns={'Date': 'ds'})
-    preds = prophet_model.predict(future)['yhat'].values
-    split_df['Prophet_Pred'] = preds
+    split_df['Prophet_Pred'] = prophet_model.predict(future)['yhat'].values
 
-# --- LightGBM (learns residual patterns from exogenous features) ---
+# 3. Final LightGBM Training
+train_df_clean['Prophet_Residual'] = train_df_clean[target_col] - train_df_clean['Prophet_Pred']
 train_df['Prophet_Residual'] = train_df[target_col] - train_df['Prophet_Pred']
+val_df['Prophet_Residual'] = val_df[target_col] - val_df['Prophet_Pred']
+test_df['Prophet_Residual'] = test_df[target_col] - test_df['Prophet_Pred']
 
-X_train = train_df[features]
-y_train_residuals = train_df['Prophet_Residual']
+X_train = train_df_clean[features]
+y_train_residuals = train_df_clean['Prophet_Residual']
+X_val = val_df[features]
+y_val_residuals = val_df['Prophet_Residual']
 
-model_lgb = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.05, max_depth=7, random_state=42, n_jobs=-1)
-model_lgb.fit(X_train, y_train_residuals)
+model_lgb = lgb.LGBMRegressor(
+    learning_rate=best_p['learning_rate'], max_depth=best_p['max_depth'], 
+    num_leaves=best_p['num_leaves'], subsample=best_p['subsample'], 
+    colsample_bytree=best_p['colsample_bytree'],
+    n_estimators=5000, random_state=42, n_jobs=-1, verbose=-1
+)
 
-# Generate LightGBM residual predictions for all splits
+model_lgb.fit(
+    X_train, y_train_residuals,
+    eval_set=[(X_val, y_val_residuals)],
+    callbacks=[
+        lgb.early_stopping(stopping_rounds=50, verbose=False),
+        lgb.log_evaluation(period=0)
+    ]
+)
+
 for split_df in [train_df, val_df, test_df]:
     split_df['LGBM_Residual_Pred'] = model_lgb.predict(split_df[features])
 
-# Final Prediction = Prophet Trend + LGBM Residual Pattern
 train_df['Final_Pred'] = train_df['Prophet_Pred'] + train_df['LGBM_Residual_Pred']
 val_df['Final_Pred'] = val_df['Prophet_Pred'] + val_df['LGBM_Residual_Pred']
 test_df['Final_Pred'] = test_df['Prophet_Pred'] + test_df['LGBM_Residual_Pred']
-
 # ============================================================
 # STEP 5: COMPREHENSIVE MODEL EVALUATION (RMSE, MAPE, MAE)
 # ============================================================
@@ -136,15 +269,6 @@ rmse_improvement = ((prophet_rmse_test - hybrid_rmse_test) / prophet_rmse_test) 
 mape_improvement = ((prophet_mape_test - hybrid_mape_test) / prophet_mape_test) * 100
 print(f"\n  >> Hybrid improves Test RMSE by {rmse_improvement:.1f}%")
 print(f"  >> Hybrid improves Test MAPE by {mape_improvement:.1f}%\n")
-
-# ============================================================
-# STEP 6: ISOLATION FOREST (Anomaly Detection)
-# ============================================================
-print("6. Training Isolation Forest (Anomaly Detection)...")
-iso_forest = IsolationForest(contamination=0.01, random_state=42, n_jobs=-1)
-iso_forest.fit(df[features])
-anomalies_count = len(df[iso_forest.predict(df[features]) == -1])
-print(f"Total Anomalies Detected: {anomalies_count} days")
 
 # ============================================================
 # STEP 6b: EXPORT MODELS & PREDICTIONS FOR DASHBOARD
@@ -344,6 +468,7 @@ print("\n" + "=" * 72)
 print("  ALL OUTPUTS SAVED:")
 print(f"    Models  -> {models_dir}")
 print(f"    Figures -> {output_dir}")
+print("    - fig0_anomalies_detected.png")
 print("    - fig1_actual_vs_predicted.png")
 print("    - fig2_model_comparison.png")
 print("    - fig3_residual_distribution.png")
