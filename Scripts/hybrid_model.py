@@ -33,15 +33,20 @@ OPTUNA_TRIALS = int(os.getenv('OPTUNA_TRIALS', '30'))
 RETUNE_EVERY_DAYS = int(os.getenv('RETUNE_EVERY_DAYS', '30'))
 FORCE_RETUNE = os.getenv('FORCE_RETUNE', '0') == '1'
 
-print("1. Loading Daily electricity dataset...")
+print("1. Pre-processing: Raw data ingestion...")
 # Load Daily Dataset
 df = pd.read_csv(os.path.join(output_dir, 'dataset_daily_processed.csv'))
 df['Date'] = pd.to_datetime(df['Date'])
 
+print("2. Handling missing values via temporal interpolation...")
+df.set_index('Date', inplace=True)
+df = df.interpolate(method='time')
+df.reset_index(inplace=True)
+
 # ============================================================
-# STEP 2: FEATURE ENGINEERING
+# STEP 3: FEATURE ENGINEERING
 # ============================================================
-print("2. Engineering Features...")
+print("3. Feature engineering (lag variables, rolling average, fitur kalender)...")
 features = [col for col in [
     'Day_of_Week', 'Is_Weekend', 'Is_Holiday',
     'Avg_Temp', 'Rainfall',
@@ -56,7 +61,7 @@ print(f"   Available features: {features}")
 # ============================================================
 # STEP 3: TRAIN/VAL/TEST SPLIT (70/15/15 Chronological)
 # ============================================================
-print("3. Splitting Data (70/15/15)...")
+print("4. time-based split 70/15/15...")
 n = len(df)
 train_end = int(n * 0.70)
 val_end = int(n * 0.85)
@@ -146,12 +151,19 @@ def objective(trial):
     lgb_subsample = trial.suggest_float('subsample', 0.7, 1.0)
     lgb_colsample = trial.suggest_float('colsample_bytree', 0.7, 1.0)
     
-    # 2. Anomaly Cleaning
+    # 2. Anomaly Cleaning (IQR + Isolation Forest)
     temp_forest = IsolationForest(n_estimators=100, max_samples='auto', contamination=contamination, random_state=42, n_jobs=-1)
     temp_forest.fit(train_df[features])
     temp_anomalies = temp_forest.predict(train_df[features])
     
-    temp_train_clean = train_df[temp_anomalies != -1].copy()
+    Q1_tmp = train_df[target_col].quantile(0.25)
+    Q3_tmp = train_df[target_col].quantile(0.75)
+    IQR_tmp = Q3_tmp - Q1_tmp
+    lower_tmp = Q1_tmp - 1.5 * IQR_tmp
+    upper_tmp = Q3_tmp + 1.5 * IQR_tmp
+    iqr_anomalies_tmp = np.where((train_df[target_col] < lower_tmp) | (train_df[target_col] > upper_tmp), -1, 1)
+    
+    temp_train_clean = train_df[(temp_anomalies != -1) & (iqr_anomalies_tmp != -1)].copy()
     if len(temp_train_clean) < len(train_df) * 0.5: # Failsafe
         return float('inf')
         
@@ -226,13 +238,30 @@ else:
 # ============================================================
 print("   Training Final Champion Architecture...")
 
-# 1. Final Anomaly Cleaner
+# 1. Final Anomaly Cleaner (Outlier detection via IQR + Isolation Forest)
 iso_forest = IsolationForest(n_estimators=300, max_samples='auto', contamination=best_p['contamination'], random_state=42, n_jobs=-1)
 iso_forest.fit(train_df[features])
-
 train_anomalies = iso_forest.predict(train_df[features])
-train_df_clean = train_df[train_anomalies != -1].copy()
-print(f"   Built final clean dataset. Removed {len(train_df) - len(train_df_clean)} anomalies.")
+
+# IQR Computation for Demand_MWh
+Q1 = train_df[target_col].quantile(0.25)
+Q3 = train_df[target_col].quantile(0.75)
+IQR_val = Q3 - Q1
+lower_bound = Q1 - 1.5 * IQR_val
+upper_bound = Q3 + 1.5 * IQR_val
+iqr_anomalies = np.where((train_df[target_col] < lower_bound) | (train_df[target_col] > upper_bound), -1, 1)
+
+# Combined Filter: remove point if requested by IF or IQR
+train_df_clean = train_df[(train_anomalies != -1) & (iqr_anomalies != -1)].copy()
+print(f"   Built final clean dataset using IQR + IF. Removed {len(train_df) - len(train_df_clean)} anomalies.")
+
+# Evaluate Isolation Forest Precision, Recall, F1 against IQR pseudo-ground truth
+from sklearn.metrics import precision_score, recall_score, f1_score
+y_true_anom = (iqr_anomalies == -1).astype(int)
+y_pred_anom = (train_anomalies == -1).astype(int)
+iso_precision = precision_score(y_true_anom, y_pred_anom, zero_division=0)
+iso_recall = recall_score(y_true_anom, y_pred_anom, zero_division=0)
+iso_f1 = f1_score(y_true_anom, y_pred_anom, zero_division=0)
 
 # Visualize Anomalies
 anomalous_data = train_df[train_anomalies == -1]
@@ -344,7 +373,14 @@ print("=" * 72)
 rmse_improvement = ((prophet_rmse_test - hybrid_rmse_test) / prophet_rmse_test) * 100
 mape_improvement = ((prophet_mape_test - hybrid_mape_test) / prophet_mape_test) * 100
 print(f"\n  >> Hybrid improves Test RMSE by {rmse_improvement:.1f}%")
-print(f"  >> Hybrid improves Test MAPE by {mape_improvement:.1f}%\n")
+print(f"  >> Hybrid improves Test MAPE by {mape_improvement:.1f}%")
+
+print("\n" + "=" * 72)
+print("  ANOMALY DETECTION EVALUATION (Isolation Forest vs IQR)")
+print("=" * 72)
+print(f"  Precision : {iso_precision:.4f}")
+print(f"  Recall    : {iso_recall:.4f}")
+print(f"  F1-Score  : {iso_f1:.4f}\n")
 
 # ============================================================
 # STEP 6b: EXPORT MODELS & PREDICTIONS FOR DASHBOARD
