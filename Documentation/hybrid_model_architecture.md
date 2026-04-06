@@ -31,11 +31,12 @@ Pendekatan Tradisional (misal: XGBoost saja) akan kebingungan saat _"Hari Raya I
 - **Cara Kerja**: Setelah Prophet membuat kerangka dasarnya, nilai kekurangannya (_Residual_ = Aktual - Prophet) diserahkan pada algoritma pohon gradient berkinerja tinggi, LightGBM. LightGBM fokus mencocokkan anomali ini dengan parameter Cuaca (Tavg, Rainfall) dan Makroekonomi (GDP, Populasi).
 - **Alasan Penggunaan**: Kinerjanya jauh lebih cepat untuk dieksekusi dibandingkan XGBoost di lingkungan lokal (Offline), lebih sensitif terhadap angka desimal cuaca ekstrem, dan kompatibel penuh dengan SHAP Values.
 
-### 3. The Guardrail (Deteksi Anomali): Isolation Forest 🚨
+### 3. The Guardrail (Deteksi Anomali + Imputasi): Isolation Forest 🚨
 
-**Tugas Utama**: Memberikan lapisan validasi tambahan. Model tidak hanya menebak _"Berapa megawatt esok hari?"_, tetapi juga mengeluarkan peringatan otomatis jika angka prediksi maupun aktual berada di zona _"Tidak Wajar"_.
+**Tugas Utama**: Memberikan lapisan validasi tambahan. Model tidak hanya menebak _"Berapa megawatt esok hari?"_, tetapi juga mendeteksi data anomali dan **mengimputasinya** agar dataset tetap utuh tanpa lubang (_gap-free time series_).
 
-- **Cara Kerja**: Model berbasis isolasi spasial pohon _decision tree_ yang mengklasifikasi apakah relasi antara Cuaca yang turun melawan Konsumsi Listrik hari itu termasuk sebagai `Inlier (Normal: 1)` atau `Outlier (Anomali: -1)`. Sangat krusial bagi operator PLN untuk deteksi pemadaman besar-besaran atau lonjakan ekstrem.
+- **Cara Kerja**: Model berbasis isolasi spasial pohon _decision tree_ (dikombinasikan dengan metode IQR) yang mengklasifikasi apakah relasi antara Cuaca yang turun melawan Konsumsi Listrik hari itu termasuk sebagai `Inlier (Normal: 1)` atau `Outlier (Anomali: -1)`. Ketika sebuah titik data terdeteksi sebagai anomali, nilainya **tidak dihapus**, melainkan **diganti (imputasi)** menggunakan rata-rata (_mean_) dari **7 hari terakhir data bersih** sebelumnya. Pendekatan ini memastikan integritas temporal dataset — tidak ada baris kosong yang menyebabkan _holes_ atau _gaps_ pada fitur-fitur lag dan _rolling window_.
+- **Fallback**: Jika tidak ada data bersih dalam jendela 7 hari ke belakang (kasus sangat jarang), digunakan rata-rata global dari seluruh data training.
 
 ---
 

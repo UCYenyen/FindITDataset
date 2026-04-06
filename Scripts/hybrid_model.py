@@ -151,7 +151,9 @@ def objective(trial):
     lgb_subsample = trial.suggest_float('subsample', 0.7, 1.0)
     lgb_colsample = trial.suggest_float('colsample_bytree', 0.7, 1.0)
     
-    # 2. Anomaly Cleaning (IQR + Isolation Forest)
+    # 2. Anomaly Detection + Imputation (IQR + Isolation Forest)
+    #    Instead of removing anomalous rows (which creates holes),
+    #    we impute them with the trailing 7-day mean of clean data.
     temp_forest = IsolationForest(n_estimators=100, max_samples='auto', contamination=contamination, random_state=42, n_jobs=-1)
     temp_forest.fit(train_df[features])
     temp_anomalies = temp_forest.predict(train_df[features])
@@ -163,9 +165,18 @@ def objective(trial):
     upper_tmp = Q3_tmp + 1.5 * IQR_tmp
     iqr_anomalies_tmp = np.where((train_df[target_col] < lower_tmp) | (train_df[target_col] > upper_tmp), -1, 1)
     
-    temp_train_clean = train_df[(temp_anomalies != -1) & (iqr_anomalies_tmp != -1)].copy()
-    if len(temp_train_clean) < len(train_df) * 0.5: # Failsafe
-        return float('inf')
+    is_anomaly_tmp = (temp_anomalies == -1) | (iqr_anomalies_tmp == -1)
+    temp_train_clean = train_df.copy()
+    # Impute each anomalous point with the mean of the last 7 days of clean data
+    for idx in np.where(is_anomaly_tmp)[0]:
+        lookback_start = max(0, idx - 7)
+        lookback_mask = ~is_anomaly_tmp[lookback_start:idx]
+        clean_window = train_df[target_col].iloc[lookback_start:idx][lookback_mask]
+        if len(clean_window) > 0:
+            temp_train_clean.iloc[idx, temp_train_clean.columns.get_loc(target_col)] = clean_window.mean()
+        else:
+            # Fallback: use global training mean if no clean data in window
+            temp_train_clean.iloc[idx, temp_train_clean.columns.get_loc(target_col)] = train_df[target_col].mean()
         
     # 3. Base Prophet
     df_prophet_temp = temp_train_clean[['Date', target_col]].rename(columns={'Date': 'ds', target_col: 'y'})
@@ -238,7 +249,9 @@ else:
 # ============================================================
 print("   Training Final Champion Architecture...")
 
-# 1. Final Anomaly Cleaner (Outlier detection via IQR + Isolation Forest)
+# 1. Final Anomaly Detection + Imputation (IQR + Isolation Forest)
+#    Anomalous values are replaced with the trailing 7-day mean of clean data,
+#    so no rows are dropped and the time series remains gap-free.
 iso_forest = IsolationForest(n_estimators=300, max_samples='auto', contamination=best_p['contamination'], random_state=42, n_jobs=-1)
 iso_forest.fit(train_df[features])
 train_anomalies = iso_forest.predict(train_df[features])
@@ -251,9 +264,23 @@ lower_bound = Q1 - 1.5 * IQR_val
 upper_bound = Q3 + 1.5 * IQR_val
 iqr_anomalies = np.where((train_df[target_col] < lower_bound) | (train_df[target_col] > upper_bound), -1, 1)
 
-# Combined Filter: remove point if requested by IF or IQR
-train_df_clean = train_df[(train_anomalies != -1) & (iqr_anomalies != -1)].copy()
-print(f"   Built final clean dataset using IQR + IF. Removed {len(train_df) - len(train_df_clean)} anomalies.")
+# Combined anomaly mask: flagged by IF or IQR
+is_anomaly = (train_anomalies == -1) | (iqr_anomalies == -1)
+num_anomalies = is_anomaly.sum()
+
+# Impute each anomalous point with the mean of the last 7 days of clean data
+train_df_clean = train_df.copy()
+for idx in np.where(is_anomaly)[0]:
+    lookback_start = max(0, idx - 7)
+    lookback_mask = ~is_anomaly[lookback_start:idx]
+    clean_window = train_df[target_col].iloc[lookback_start:idx][lookback_mask]
+    if len(clean_window) > 0:
+        train_df_clean.iloc[idx, train_df_clean.columns.get_loc(target_col)] = clean_window.mean()
+    else:
+        # Fallback: use global training mean if no clean data in window
+        train_df_clean.iloc[idx, train_df_clean.columns.get_loc(target_col)] = train_df[target_col].mean()
+
+print(f"   Built final clean dataset using IQR + IF. Imputed {num_anomalies} anomalies (0 rows removed).")
 
 # Evaluate Isolation Forest Precision, Recall, F1 against IQR pseudo-ground truth
 from sklearn.metrics import precision_score, recall_score, f1_score
@@ -373,14 +400,7 @@ print("=" * 72)
 rmse_improvement = ((prophet_rmse_test - hybrid_rmse_test) / prophet_rmse_test) * 100
 mape_improvement = ((prophet_mape_test - hybrid_mape_test) / prophet_mape_test) * 100
 print(f"\n  >> Hybrid improves Test RMSE by {rmse_improvement:.1f}%")
-print(f"  >> Hybrid improves Test MAPE by {mape_improvement:.1f}%")
-
-print("\n" + "=" * 72)
-print("  ANOMALY DETECTION EVALUATION (Isolation Forest vs IQR)")
-print("=" * 72)
-print(f"  Precision : {iso_precision:.4f}")
-print(f"  Recall    : {iso_recall:.4f}")
-print(f"  F1-Score  : {iso_f1:.4f}\n")
+print(f"  >> Hybrid improves Test MAPE by {mape_improvement:.1f}%\n")
 
 # ============================================================
 # STEP 6b: EXPORT MODELS & PREDICTIONS FOR DASHBOARD
