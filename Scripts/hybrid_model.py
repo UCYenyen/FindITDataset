@@ -3,19 +3,20 @@ import json
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend (no GUI window)
+import optuna
+import logging
 import matplotlib.pyplot as plt
 from prophet import Prophet
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
+from sklearn.metrics import precision_score, recall_score, f1_score
 import lightgbm as lgb
 import shap
 import joblib
 import warnings
-import itertools
-from prophet.diagnostics import cross_validation, performance_metrics
 import logging
+
+matplotlib.use('Agg') 
 warnings.filterwarnings('ignore')
 
 # Resolve paths relative to this script's location
@@ -127,8 +128,6 @@ def should_retune(saved_payload):
 # STEP 3.5 & 4: JOINT BAYESIAN OPTIMIZATION (OPTUNA)
 # ============================================================
 print("3.5 & 4: Joint Bayesian Optimization (Optuna)...")
-import optuna
-import logging
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -283,7 +282,7 @@ for idx in np.where(is_anomaly)[0]:
 print(f"   Built final clean dataset using IQR + IF. Imputed {num_anomalies} anomalies (0 rows removed).")
 
 # Evaluate Isolation Forest Precision, Recall, F1 against IQR pseudo-ground truth
-from sklearn.metrics import precision_score, recall_score, f1_score
+
 y_true_anom = (iqr_anomalies == -1).astype(int)
 y_pred_anom = (train_anomalies == -1).astype(int)
 iso_precision = precision_score(y_true_anom, y_pred_anom, zero_division=0)
