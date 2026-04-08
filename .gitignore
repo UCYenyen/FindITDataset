@@ -1,7 +1,11 @@
-Outputs/
-Models/
+# Ignore only visualization figures in Outputs, keep CSV datasets
+Outputs/*
+!Outputs/*.csv
+
+# Do not ignore model files as they are needed for the dashboard
+!Models/
+!Models/*
+
 .DS_Store
 venv/
 output_xai.png
-Outputs/*xai*.png
-Outputs/*shap*.png
