@@ -2,3 +2,6 @@ Outputs/
 Models/
 .DS_Store
 venv/
+output_xai.png
+Outputs/*xai*.png
+Outputs/*shap*.png
