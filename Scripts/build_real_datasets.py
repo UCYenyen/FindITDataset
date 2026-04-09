@@ -115,28 +115,46 @@ for y in range(2018, 2024):
     yearly_MWh = yearly_demand[y] * 1000 # GWh to MWh
     base_demand = (df_y['Daily_Weight'] / total_weight) * yearly_MWh
 
-    # 1. Multiplicative noise: ±5% day-to-day volatility
-    #    Simulates unmeasured factors (industrial activity, random AC usage, etc.)
-    daily_noise_pct = np.random.normal(0, 0.05, size=len(df_y))
+    # 1. Multiplicative noise
+    daily_noise_pct = np.random.normal(0, 0.0005, size=len(df_y))
 
-    # 2. Additive Gaussian noise: ~3% of mean daily demand
-    #    Simulates measurement error and baseline uncertainty
-    additive_noise = np.random.normal(0, base_demand.mean() * 0.03, size=len(df_y))
+    # 2. Additive Gaussian noise
+    additive_noise = np.random.normal(0, base_demand.mean() * 0.0005, size=len(df_y))
 
     df_y['Demand_MWh'] = base_demand * (1 + daily_noise_pct) + additive_noise
     all_days.append(df_y)
 
 df_daily = pd.concat(all_days)
 
-# Lags
-df_daily['Lag_1'] = df_daily['Demand_MWh'].shift(1)
-df_daily['Lag_7'] = df_daily['Demand_MWh'].shift(7)
-df_daily['Lag_30'] = df_daily['Demand_MWh'].shift(30)
-df_daily['Rolling_7'] = df_daily['Demand_MWh'].rolling(window=7, min_periods=1).mean()
+daily_cols = ['Date', 'Demand_MWh', 'Day_of_Week', 'Is_Weekend', 'Is_Holiday', 'Avg_Temp', 'Rainfall']
 
-daily_cols = ['Date', 'Demand_MWh', 'Day_of_Week', 'Is_Weekend', 'Is_Holiday', 'Avg_Temp', 'Rainfall', 'Lag_1', 'Lag_7', 'Lag_30', 'Rolling_7']
-df_daily_out = df_daily[daily_cols].iloc[30:].reset_index(drop=True)
-df_daily_out.to_csv(os.path.join(output_dir, 'dataset_daily_processed.csv'), index=False)
+n_total = len(df_daily)
+train_end = int(n_total * 0.70)
+val_end = int(n_total * 0.85)
+
+train_df = df_daily.iloc[:train_end].copy()
+val_df = df_daily.iloc[train_end:val_end].copy()
+test_df = df_daily.iloc[val_end:].copy()
+
+def apply_features(df):
+    df['Lag_1'] = df['Demand_MWh'].shift(1)
+    df['Lag_7'] = df['Demand_MWh'].shift(7)
+    df['Lag_30'] = df['Demand_MWh'].shift(30)
+    df['Rolling_7'] = df['Demand_MWh'].rolling(window=7, min_periods=1).mean()
+    return df[['Date', 'Demand_MWh', 'Day_of_Week', 'Is_Weekend', 'Is_Holiday', 'Avg_Temp', 'Rainfall', 'Lag_1', 'Lag_7', 'Lag_30', 'Rolling_7']]
+
+df_train_out = apply_features(train_df).iloc[30:].reset_index(drop=True)
+df_val_out = apply_features(val_df).iloc[30:].reset_index(drop=True)
+df_test_out = apply_features(test_df).iloc[30:].reset_index(drop=True)
+
+train_dir = os.path.join(PROJECT_ROOT, 'train_data')
+test_dir = os.path.join(PROJECT_ROOT, 'test_data')
+os.makedirs(train_dir, exist_ok=True)
+os.makedirs(test_dir, exist_ok=True)
+
+df_train_out.to_csv(os.path.join(train_dir, 'dataset_daily_train.csv'), index=False)
+df_val_out.to_csv(os.path.join(test_dir, 'dataset_daily_val.csv'), index=False)
+df_test_out.to_csv(os.path.join(test_dir, 'dataset_daily_test.csv'), index=False)
 
 # CREATE MONTHLY FRAMEWORK
 df_daily['Month'] = df_daily['Date'].dt.month

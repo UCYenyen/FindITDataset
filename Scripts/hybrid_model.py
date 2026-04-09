@@ -32,44 +32,48 @@ params_path = os.path.join(models_dir, 'best_hybrid_params.json')
 # Tuning control (can be overridden from environment variables)
 OPTUNA_TRIALS = int(os.getenv('OPTUNA_TRIALS', '30'))
 RETUNE_EVERY_DAYS = int(os.getenv('RETUNE_EVERY_DAYS', '30'))
-FORCE_RETUNE = os.getenv('FORCE_RETUNE', '0') == '1'
+FORCE_RETUNE = True
 
 print("1. Pre-processing: Raw data ingestion...")
-# Load Daily Dataset
-df = pd.read_csv(os.path.join(output_dir, 'dataset_daily_processed.csv'))
-df['Date'] = pd.to_datetime(df['Date'])
+train_dir = os.path.join(PROJECT_ROOT, 'train_data')
+test_dir = os.path.join(PROJECT_ROOT, 'test_data')
 
-print("2. Handling missing values via temporal interpolation...")
-df.set_index('Date', inplace=True)
-df = df.interpolate(method='time')
-df.reset_index(inplace=True)
+train_df = pd.read_csv(os.path.join(train_dir, 'dataset_daily_train.csv'))
+val_df = pd.read_csv(os.path.join(test_dir, 'dataset_daily_val.csv'))
+test_df = pd.read_csv(os.path.join(test_dir, 'dataset_daily_test.csv'))
 
-# ============================================================
-# STEP 3: FEATURE ENGINEERING
-# ============================================================
-print("3. Feature engineering (lag variables, rolling average, fitur kalender)...")
+train_df['Date'] = pd.to_datetime(train_df['Date'])
+val_df['Date'] = pd.to_datetime(val_df['Date'])
+test_df['Date'] = pd.to_datetime(test_df['Date'])
+
+print("2. Handling missing values via temporal interpolation per partition...")
+def apply_interpolation(df_part):
+    df_part.set_index('Date', inplace=True)
+    df_part = df_part.interpolate(method='time')
+    df_part.reset_index(inplace=True)
+    return df_part
+
+train_df = apply_interpolation(train_df)
+val_df = apply_interpolation(val_df)
+test_df = apply_interpolation(test_df)
+
+print("3. Feature checking and cleanup...")
 features = [col for col in [
     'Day_of_Week', 'Is_Weekend', 'Is_Holiday',
     'Avg_Temp', 'Rainfall',
     'Lag_1', 'Lag_7', 'Lag_30', 'Rolling_7',
-] if col in df.columns]
+] if col in train_df.columns]
 
 target_col = 'Demand_MWh'
-df = df.dropna(subset=features + [target_col]).copy()
+train_df = train_df.dropna(subset=features + [target_col]).copy()
+val_df = val_df.dropna(subset=features + [target_col]).copy()
+test_df = test_df.dropna(subset=features + [target_col]).copy()
+
+# Concatenate back to 'df' for global feature/visualisation usage
+df = pd.concat([train_df, val_df, test_df]).sort_values('Date').reset_index(drop=True)
 
 print(f"   Available features: {features}")
 
-# ============================================================
-# STEP 3: TRAIN/VAL/TEST SPLIT (70/15/15 Chronological)
-# ============================================================
-print("4. time-based split 70/15/15...")
-n = len(df)
-train_end = int(n * 0.70)
-val_end = int(n * 0.85)
-
-train_df = df.iloc[:train_end].copy()
-val_df = df.iloc[train_end:val_end].copy()
-test_df = df.iloc[val_end:].copy()
 print(f"   Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
 
 required_param_keys = {
