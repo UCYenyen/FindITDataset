@@ -40,7 +40,16 @@ Pendekatan Tradisional (misal: XGBoost saja) akan kebingungan saat _"Hari Raya I
 
 ---
 
-## 🔒 Anti-Leakage Design: Noise Stokastik
+## 🛡️ Pre-processing Guardrail: Zero-Leakage KNN Imputation
+
+Sebelum masuk ke Trinitas di atas, dataset melalui sebuah palang gerbang awal untuk menangani nilai bolong (_missing values_). Alih-alih menggunakan gaya imputer matematis primitif (seperti `interpolate(method='spline')`) yang rentan _data leakage_ dan acapkali menarik garis lurus yang tidak wajar:
+
+- **Cara Kerja**: Kami membentangkan **K-Nearest Neighbors (KNN) Imputer** berdimensi-N. Imputer ini secara eksklusif **HANYA di-fit pada partisi Train**.
+- **Keunggulan**: Ketika dihadapkan pada kekosongan di masa depan (Validation/Test/Produksi), model mencari 5 proksi historis dengan jarak iklim terbaca (suhu, hujan, letak bulan) untuk menambal nilai secara natural. Ini menjamin pengisian data bolong mengikuti struktur fisik asli alam, mempersembahkan kurva yang dinamis, dengan kebocoran data matematis mutlak 0% (_Zero Data Leakage_).
+
+---
+
+## 🔒 Anti-Leakage Design: Noise Stokastik & Distribusi Mulus
 
 Dataset kami menggunakan alokasi proporsional dari data tahunan BPS untuk menghasilkan target harian (`Demand_MWh`). Agar model tidak sekedar **merekayasa balik formula alokasi** (yang akan menghasilkan prediksi "terlalu sempurna" / _Target Leakage_), kami menerapkan lapisan **noise stokastik Gaussian** pada target:
 

@@ -203,12 +203,13 @@ Total variasi gabungan ~6–8% memaksa model belajar generalisasi dari pola nyat
 | `Day_of_Week` | Integer | 0=Senin … 6=Minggu | Dihitung dari `Date` |
 | `Is_Weekend` | Integer | 1=Sabtu/Minggu, 0=hari kerja | Filter dari `Date` |
 | `Is_Holiday` | Integer | 1=Libur Nasional, 0=bukan | JSON holidays (guangrei) |
+| `Month`, `DayOfYear`, `WeekOfYear` | Integer | Siklus Temporal & Kalenderisasi | Dihitung dari `Date` |
+| `Trend` | Integer | Penanda hari linier berjalannya waktu sejak hari pertama dataset | Dihitung dari `Date` |
 | `Avg_Temp` | Float | Suhu rata-rata nasional harian (°C) | Kaggle/BMKG `climate_data.csv` |
 | `Rainfall` | Float | Curah hujan rata-rata harian (mm) | Kaggle/BMKG `climate_data.csv` |
-| `Lag_1` | Float | Demand 1 hari sebelumnya | Feature engineering |
-| `Lag_7` | Float | Demand 7 hari sebelumnya | Feature engineering |
-| `Lag_30` | Float | Demand 30 hari sebelumnya | Feature engineering |
-| `Rolling_7` | Float | Moving average demand 7 hari | Feature engineering |
+| `Temp_Lag_1` | Float | Suhu historis H-1 | Feature engineering |
+| `Lag_1` ... `Lag_30` | Float | Demand 1, 2, 7, 14, 30 hari sebelumnya | Feature engineering |
+| `Rolling_7`, `14`, `30` | Float | Moving average demand berbagai batas waktu | Feature engineering |
 
 ### 5.2 Dataset Bulanan
 
@@ -283,17 +284,17 @@ Total variasi gabungan ~6–8% memaksa model belajar generalisasi dari pola nyat
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                    STEP 2: TEMPORAL INTERPOLATION                       │
-│   Isi nilai kosong menggunakan interpolasi berbasis waktu              │
-│   (method='time') — menjaga kelancaran time series                     │
+│                    STEP 2: KNN IMPUTATION (ZERO-LEAKAGE)                │
+│   Pengisian nilai kosong menggunakan Machine Learning KNNImputer yang  │
+│   hanya dilatih pada data historis Train. Mengisi pola cuaca dan gaps  │
+│   secara presisi.                                                      │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                      STEP 3: FEATURE SELECTION                          │
-│   Fitur: Day_of_Week, Is_Weekend, Is_Holiday, Avg_Temp, Rainfall,     │
-│          Lag_1, Lag_7, Lag_30, Rolling_7                               │
-│   Target: Demand_MWh                                                   │
-│   Hapus baris NaN pada fitur + target                                  │
+│                      STEP 3: FEATURE ENGINEERING MODULE                 │
+│   Ekspansi 18 fitur: Month, DayOfYear, IsHoliday, Avg_Temp, Rainfall,  │
+│   Temp_Lag_1, Lags (1, 2, 7, 14, 30), Rolling_Means (7, 14, 30)        │
+│   Hapus observasi yang mengandung NaN akibat Auto-Regressive cut-off   │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
