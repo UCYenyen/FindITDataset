@@ -53,22 +53,18 @@ df_daily['Date'] = pd.to_datetime(df_daily['Date'])
 # We will overwrite matching dates, and for missing historic dates, use the statistical mean of the BMKG data extracted to anchor the synthetic data to reality.
 
 if not df_bmkg_daily.empty:
-    avg_real_temp = df_bmkg_daily['Temp'].mean()
-    avg_real_rain = df_bmkg_daily['Rain'].mean()
-    
     # Left merge to overwrite available dates
     df_daily = pd.merge(df_daily, df_bmkg_daily, on='Date', how='left')
     
-    # Replace synthetic with real where available
+    bmkg_matches = df_daily['Temp'].notna().sum()
+    
+    # Only replace dates where BMKG has real observations — keep existing
+    # Kaggle Climate data for all other dates untouched
     df_daily['Avg_Temp'] = np.where(df_daily['Temp'].notna(), df_daily['Temp'], df_daily['Avg_Temp'])
     df_daily['Rainfall'] = np.where(df_daily['Rain'].notna(), df_daily['Rain'], df_daily['Rainfall'])
     
-    # Calibrate the synthetic historic data to match the statistical distribution of the BMKG real data
-    # (So it doesn't jump wildly between real and synthetic)
-    df_daily.loc[df_daily['Temp'].isna(), 'Avg_Temp'] = avg_real_temp + np.random.normal(0, 1.5, size=df_daily['Temp'].isna().sum())
-    df_daily.loc[df_daily['Rain'].isna(), 'Rainfall'] = np.random.exponential(scale=avg_real_rain + 0.1, size=df_daily['Rain'].isna().sum())
-    
     df_daily.drop(columns=['Temp', 'Rain'], inplace=True)
+    print(f"   Overwrote {bmkg_matches} dates with real BMKG observations, kept existing data for all others.")
 else:
     print("No valid BMKG dates merged.")
 

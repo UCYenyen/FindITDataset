@@ -1,27 +1,37 @@
 {
   "best_params": {
-    "contamination": 0.0015883444938205615,
-    "changepoint_prior_scale": 0.1222381083098316,
-    "seasonality_prior_scale": 0.19351140885595264,
-    "learning_rate": 0.08803774642925566,
+    "contamination": 0.0014502528269499913,
+    "changepoint_prior_scale": 0.03252471492953217,
+    "seasonality_prior_scale": 0.7301559357065806,
+    "n_changepoints": 43,
+    "learning_rate": 0.12131828147950234,
     "max_depth": 5,
-    "num_leaves": 35,
-    "subsample": 0.7793666836313881,
-    "colsample_bytree": 0.932270106830265
+    "num_leaves": 103,
+    "subsample": 0.8625150532214484,
+    "colsample_bytree": 0.6195908501273024
   },
-  "last_tuned_at": "2026-04-09T11:32:45.749313",
-  "n_trials": 30,
+  "last_tuned_at": "2026-04-09T13:22:10.823824",
+  "n_trials": 50,
   "retune_every_days": 30,
   "target_col": "Demand_MWh",
   "features": [
     "Day_of_Week",
     "Is_Weekend",
     "Is_Holiday",
+    "Month",
+    "DayOfYear",
+    "WeekOfYear",
+    "Trend",
     "Avg_Temp",
     "Rainfall",
+    "Temp_Lag_1",
     "Lag_1",
+    "Lag_2",
     "Lag_7",
+    "Lag_14",
     "Lag_30",
-    "Rolling_7"
+    "Rolling_7",
+    "Rolling_14",
+    "Rolling_30"
   ]
 }

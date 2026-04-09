@@ -58,8 +58,10 @@ st.caption(
 # Features must match what the model was trained on (daily dataset only, no macro columns)
 model_features = [
     'Day_of_Week', 'Is_Weekend', 'Is_Holiday',
-    'Avg_Temp', 'Rainfall',
-    'Lag_1', 'Lag_7', 'Lag_30', 'Rolling_7',
+    'Month', 'DayOfYear', 'WeekOfYear', 'Trend',
+    'Avg_Temp', 'Rainfall', 'Temp_Lag_1',
+    'Lag_1', 'Lag_2', 'Lag_7', 'Lag_14', 'Lag_30',
+    'Rolling_7', 'Rolling_14', 'Rolling_30',
 ]
 
 # Only keep features that actually exist in the loaded data
@@ -72,24 +74,42 @@ feature_dict = {
     'Day_of_Week': 'Siklus Hari (Day_of_Week)',
     'Is_Weekend': 'Status Akhir Pekan (Is_Weekend)',
     'Is_Holiday': 'Status Hari Libur (Is_Holiday)',
+    'Month': 'Bulan (Month)',
+    'DayOfYear': 'Hari ke-n dalam setahun (DayOfYear)',
+    'WeekOfYear': 'Minggu ke-n dalam setahun (WeekOfYear)',
+    'Trend': 'Tren (Trend)',
     'Avg_Temp': 'Suhu Rata-Rata (Avg_Temp)',
     'Rainfall': 'Curah Hujan (Rainfall)',
+    'Temp_Lag_1': 'Suhu H-1 (Temp_Lag_1)',
     'Lag_1': 'Beban H-1 (Lag_1)',
+    'Lag_2': 'Beban H-2 (Lag_2)',
     'Lag_7': 'Beban Minggu Lalu (Lag_7)',
+    'Lag_14': 'Beban 2 Minggu Lalu (Lag_14)',
     'Lag_30': 'Beban Bulan Lalu (Lag_30)',
     'Rolling_7': 'Tren Rata-rata 7 Hari (Rolling_7)',
+    'Rolling_14': 'Tren Rata-rata 14 Hari (Rolling_14)',
+    'Rolling_30': 'Tren Rata-rata 30 Hari (Rolling_30)',
 }
 
 feature_desc = {
     'Day_of_Week': 'Siklus operasional mingguan (Senin-Minggu) yang membedakan ritme aktivitas masyarakat.',
     'Is_Weekend': 'Mengurangi beban dasar secara signifikan karena perkantoran dan pasar tutup.',
     'Is_Holiday': 'Penurunan drastis beban listrik akibat libur nasional/tanggal merah secara serentak.',
+    'Month': 'Perbedaan musiman antar bulan.',
+    'DayOfYear': 'Pola tahunan beban yang berulang secara spesifik per harinya.',
+    'WeekOfYear': 'Siklus beban berdasarkan minggu dalam tahun.',
+    'Trend': 'Indikator pergerakan beban seiring dengan waktu.',
     'Avg_Temp': 'Suhu harian; suhu tinggi memicu penggunaan AC (Cooling Demand) secara masif.',
     'Rainfall': 'Curah hujan memengaruhi visibilitas aktivitas luar ruang dan menekan suhu lokal.',
+    'Temp_Lag_1': 'Pengaruh suhu pada hari sebelumnya terhadap beban hari ini.',
     'Lag_1': 'Inersia konsumsi dari 1 hari sebelumnya (Efek memori jangka pendek jaringan).',
+    'Lag_2': 'Inersia konsumsi dari 2 hari sebelumnya.',
     'Lag_7': 'Cerminan historis pola beban pada hari yang sama persis di minggu sebelumnya.',
+    'Lag_14': 'Pola dari 2 minggu sebelumnya.',
     'Lag_30': 'Cerminan historis pola beban pada siklus bulanan sebelumnya.',
     'Rolling_7': 'Garis pergerakan rata-rata beban selama seminggu terakhir untuk melihat tren halus.',
+    'Rolling_14': 'Pergerakan rata-rata beban dua minggu.',
+    'Rolling_30': 'Pergerakan rata-rata beban sebulan terakhir.',
 }
 
 tab1, tab2 = st.tabs(["📊 Validasi Sistem (Historis)", "🔮 Future Forecaster & Local XAI"])
@@ -191,7 +211,7 @@ with tab1:
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Prophet Components")
-        df_prophet = df_clean[['Date']].rename(columns={'Date': 'ds'})
+        df_prophet = df_clean[['Date', 'Avg_Temp']].rename(columns={'Date': 'ds'})
         forecast = prophet_model.predict(df_prophet)
         fig_prophet = prophet_model.plot_components(forecast)
         st.pyplot(fig_prophet)
@@ -282,15 +302,24 @@ with tab2:
             'Day_of_Week': [day_of_week],
             'Is_Weekend': [is_weekend],
             'Is_Holiday': [is_holiday],
+            'Month': [target_date.month],
+            'DayOfYear': [target_date.timetuple().tm_yday],
+            'WeekOfYear': [target_date.isocalendar()[1]],
+            'Trend': [(pd.to_datetime(target_date) - pd.Timestamp('2018-01-01')).days],
             'Avg_Temp': [avg_temp],
             'Rainfall': [rainfall],
+            'Temp_Lag_1': [last_known_data.get('Avg_Temp', avg_temp)],
             'Lag_1': [last_known_data['Demand_MWh']], 
+            'Lag_2': [last_known_data.get('Lag_1', last_known_data['Demand_MWh'])],
             'Lag_7': [last_known_data.get('Lag_7', last_known_data['Demand_MWh'])], 
+            'Lag_14': [last_known_data.get('Lag_14', last_known_data['Demand_MWh'])],
             'Lag_30': [last_known_data.get('Lag_30', last_known_data['Demand_MWh'])],
             'Rolling_7': [last_known_data.get('Rolling_7', last_known_data['Demand_MWh'])],
+            'Rolling_14': [last_known_data.get('Rolling_14', last_known_data['Demand_MWh'])],
+            'Rolling_30': [last_known_data.get('Rolling_30', last_known_data['Demand_MWh'])],
         }).astype(float)
         
-        prophet_df = pd.DataFrame({'ds': [pd.to_datetime(target_date)]})
+        prophet_df = pd.DataFrame({'ds': [pd.to_datetime(target_date)], 'Avg_Temp': [avg_temp]})
         base_demand = prophet_model.predict(prophet_df)['yhat'].values[0]
         weather_residual = lgbm_model.predict(custom_data)[0]
         final_demand = base_demand + weather_residual

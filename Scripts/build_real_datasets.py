@@ -44,14 +44,38 @@ macro_path = os.path.join(raw_data_dir, 'World_Bank_Macro', 'API_IDN_DS2_en_csv_
 df_macro = pd.read_csv(macro_path, skiprows=4)
 ind_gdp = df_macro[df_macro['Indicator Code'] == 'NY.GDP.MKTP.CD']
 ind_pop = df_macro[df_macro['Indicator Code'] == 'SP.POP.TOTL']
+# Real industrial activity: Manufacturing value added (constant 2015 US$)
+ind_manuf = df_macro[df_macro['Indicator Code'] == 'NV.IND.MANF.KD']
 
 macro_dict = {}
 for y in range(2018, 2024):
     y_str = str(y)
+    # Extract manufacturing value added and convert to an index (base 2018 = 100)
+    manuf_val = ind_manuf[y_str].values[0] if (len(ind_manuf) > 0 and y_str in ind_manuf) else np.nan
     macro_dict[y] = {
         'GDP': ind_gdp[y_str].values[0] / 1e9 if y_str in ind_gdp else np.nan,
-        'Population': ind_pop[y_str].values[0] if y_str in ind_pop else np.nan
+        'Population': ind_pop[y_str].values[0] if y_str in ind_pop else np.nan,
+        'Manufacturing_VA': manuf_val,  # constant 2015 US$
     }
+
+# Convert Manufacturing VA to an index (base year 2018 = 100) for easier interpretation
+base_manuf = macro_dict[2018]['Manufacturing_VA']
+if pd.notna(base_manuf) and base_manuf > 0:
+    for y in macro_dict:
+        if pd.notna(macro_dict[y]['Manufacturing_VA']):
+            macro_dict[y]['Industrial_Index'] = (macro_dict[y]['Manufacturing_VA'] / base_manuf) * 100
+        else:
+            macro_dict[y]['Industrial_Index'] = np.nan
+else:
+    # Fallback: use Industry value added annual % growth (NV.IND.TOTL.KD.ZG)
+    ind_growth = df_macro[df_macro['Indicator Code'] == 'NV.IND.TOTL.KD.ZG']
+    idx = 100.0
+    for y in range(2018, 2024):
+        y_str = str(y)
+        growth = ind_growth[y_str].values[0] if (len(ind_growth) > 0 and y_str in ind_growth) else 0
+        if y > 2018 and pd.notna(growth):
+            idx *= (1 + growth / 100)
+        macro_dict[y]['Industrial_Index'] = idx
 
 print("3. Parsing Kaggle Climate Data & BMKG Holidays...")
 climate_path = os.path.join(raw_data_dir, 'Kaggle_Climate', 'climate_data.csv')
@@ -102,29 +126,30 @@ df_daily.loc[df_daily['Is_Holiday'] == 1, 'Daily_Weight'] -= 0.3
 # Hotter days map to higher demand
 df_daily['Daily_Weight'] += (df_daily['Avg_Temp'] - 27) * 0.05
 
-# === STOCHASTIC NOISE: break deterministic feature->target link ===
-# Without noise, Demand_MWh is a pure function of (Is_Weekend, Is_Holiday, Avg_Temp),
-# which causes target leakage — the model reverse-engineers the formula instead of
-# learning real consumption patterns.
+# Create a smooth continuous trend curve for the base yearly volume
+# Map each year's demand to July 1st to anchor the trend
+yd_dates = pd.to_datetime([f"{y}-07-01" for y in range(2018, 2024)])
+yd_values = [yearly_demand[y] * 1000 for y in range(2018, 2024)]  # GWh to MWh
+yearly_series = pd.Series(yd_values, index=yd_dates)
+
+# Reindex and interpolate across all daily dates in our dataset
+df_daily.set_index('Date', inplace=True)
+df_daily['Smooth_Yearly_MWh'] = yearly_series
+df_daily['Smooth_Yearly_MWh'] = df_daily['Smooth_Yearly_MWh'].interpolate(method='time').bfill().ffill()
+df_daily.reset_index(inplace=True)
+
+# Distribute continuously based on weight
+# Note: Since Smooth_Yearly_MWh is a yearly volume, average daily baseline is Smooth / 365.25
+avg_daily_weight = df_daily['Daily_Weight'].mean()
+base_demand_continuous = (df_daily['Smooth_Yearly_MWh'] / 365.25) * (df_daily['Daily_Weight'] / avg_daily_weight)
+
+# === STOCHASTIC NOISE ===
+# Without noise, Demand_MWh is a pure deterministic formula
 np.random.seed(42)
+daily_noise_pct = np.random.normal(0, 0.0005, size=len(df_daily))
+additive_noise = np.random.normal(0, base_demand_continuous.mean() * 0.0005, size=len(df_daily))
 
-all_days = []
-for y in range(2018, 2024):
-    df_y = df_daily[df_daily['Year'] == y].copy()
-    total_weight = df_y['Daily_Weight'].sum()
-    yearly_MWh = yearly_demand[y] * 1000 # GWh to MWh
-    base_demand = (df_y['Daily_Weight'] / total_weight) * yearly_MWh
-
-    # 1. Multiplicative noise
-    daily_noise_pct = np.random.normal(0, 0.0005, size=len(df_y))
-
-    # 2. Additive Gaussian noise
-    additive_noise = np.random.normal(0, base_demand.mean() * 0.0005, size=len(df_y))
-
-    df_y['Demand_MWh'] = base_demand * (1 + daily_noise_pct) + additive_noise
-    all_days.append(df_y)
-
-df_daily = pd.concat(all_days)
+df_daily['Demand_MWh'] = base_demand_continuous * (1 + daily_noise_pct) + additive_noise
 
 daily_cols = ['Date', 'Demand_MWh', 'Day_of_Week', 'Is_Weekend', 'Is_Holiday', 'Avg_Temp', 'Rainfall']
 
@@ -171,9 +196,10 @@ df_monthly['Population'] = df_monthly['Year'].map(lambda x: macro_dict[x]['Popul
 df_monthly['GDP'] = df_monthly['GDP'].ffill().bfill()
 df_monthly['Population'] = df_monthly['Population'].ffill().bfill()
 
-# Industrial Index (since no actual file, adding a stable index base)
-np.random.seed(42)
-df_monthly['Industrial_Index'] = np.linspace(100, 130, len(df_monthly)) + np.random.normal(0, 2, len(df_monthly))
+# Industrial Index from real World Bank Manufacturing Value Added data
+# Yearly values are mapped to each month; monthly interpolation smooths transitions
+df_monthly['Industrial_Index'] = df_monthly['Year'].map(lambda x: macro_dict[x]['Industrial_Index'])
+df_monthly['Industrial_Index'] = df_monthly['Industrial_Index'].interpolate(method='linear').ffill().bfill()
 
 df_monthly['Lag_1'] = df_monthly['Demand_GWh'].shift(1)
 df_monthly['Lag_12'] = df_monthly['Demand_GWh'].shift(12)

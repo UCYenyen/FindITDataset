@@ -10,6 +10,7 @@ from prophet import Prophet
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.impute import KNNImputer
 import lightgbm as lgb
 import shap
 import joblib
@@ -30,7 +31,7 @@ os.makedirs(models_dir, exist_ok=True)
 params_path = os.path.join(models_dir, 'best_hybrid_params.json')
 
 # Tuning control (can be overridden from environment variables)
-OPTUNA_TRIALS = int(os.getenv('OPTUNA_TRIALS', '30'))
+OPTUNA_TRIALS = int(os.getenv('OPTUNA_TRIALS', '50'))
 RETUNE_EVERY_DAYS = int(os.getenv('RETUNE_EVERY_DAYS', '30'))
 FORCE_RETUNE = True
 
@@ -46,25 +47,58 @@ train_df['Date'] = pd.to_datetime(train_df['Date'])
 val_df['Date'] = pd.to_datetime(val_df['Date'])
 test_df['Date'] = pd.to_datetime(test_df['Date'])
 
-print("2. Handling missing values via temporal interpolation per partition...")
-def apply_interpolation(df_part):
-    df_part.set_index('Date', inplace=True)
-    df_part = df_part.interpolate(method='time')
-    df_part.reset_index(inplace=True)
-    return df_part
+print("2. Handling missing values via KNN Imputation (Fit on Train, Apply to all)...")
+# We use Time_Idx to help the KNN imputer understand seasonality and temporal proximity
+for df_part in [train_df, val_df, test_df]:
+    df_part['Time_Idx'] = df_part['Date'].dt.dayofyear
 
-train_df = apply_interpolation(train_df)
-val_df = apply_interpolation(val_df)
-test_df = apply_interpolation(test_df)
+features_to_impute = ['Time_Idx', 'Demand_MWh', 'Avg_Temp', 'Rainfall']
 
-print("3. Feature checking and cleanup...")
+imputer = KNNImputer(n_neighbors=5, weights='distance')
+# 1. FIT STRICTLY ON TRAIN
+imputer.fit(train_df[features_to_impute])
+
+# 2. APPLY TO ALL PARTITIONS 
+train_df[features_to_impute] = imputer.transform(train_df[features_to_impute])
+val_df[features_to_impute]   = imputer.transform(val_df[features_to_impute])
+test_df[features_to_impute]  = imputer.transform(test_df[features_to_impute])
+
+# Clean up Time_Idx as it's not a final feature
+for df_part in [train_df, val_df, test_df]:
+    df_part.drop(columns=['Time_Idx'], inplace=True)
+
+# Save the imputer for inference
+models_dir = os.path.join(PROJECT_ROOT, 'Models')
+os.makedirs(models_dir, exist_ok=True)
+joblib.dump(imputer, os.path.join(models_dir, 'knn_imputer.joblib'))
+
+print("3. Feature engineering & cleanup...")
+target_col = 'Demand_MWh'
+
+# --- Derive additional temporal and autoregressive features ---
+for df_part in [train_df, val_df, test_df]:
+    df_part['Month']      = df_part['Date'].dt.month
+    df_part['DayOfYear']  = df_part['Date'].dt.dayofyear
+    df_part['WeekOfYear'] = df_part['Date'].dt.isocalendar().week.astype(int)
+    # Continuous trend (days since start) — helps model learn demand growth
+    df_part['Trend'] = (df_part['Date'] - pd.Timestamp('2018-01-01')).dt.days
+    # Extra lags
+    df_part['Lag_2']  = df_part[target_col].shift(2)
+    df_part['Lag_14'] = df_part[target_col].shift(14)
+    # Broader rolling windows
+    df_part['Rolling_14'] = df_part[target_col].rolling(window=14, min_periods=1).mean()
+    df_part['Rolling_30'] = df_part[target_col].rolling(window=30, min_periods=1).mean()
+    # Temperature momentum (yesterday's temp)
+    df_part['Temp_Lag_1'] = df_part['Avg_Temp'].shift(1)
+
 features = [col for col in [
     'Day_of_Week', 'Is_Weekend', 'Is_Holiday',
-    'Avg_Temp', 'Rainfall',
-    'Lag_1', 'Lag_7', 'Lag_30', 'Rolling_7',
+    'Month', 'DayOfYear', 'WeekOfYear', 'Trend',
+    'Avg_Temp', 'Rainfall', 'Temp_Lag_1',
+    'Lag_1', 'Lag_2', 'Lag_7', 'Lag_14', 'Lag_30',
+    'Rolling_7', 'Rolling_14', 'Rolling_30',
 ] if col in train_df.columns]
 
-target_col = 'Demand_MWh'
 train_df = train_df.dropna(subset=features + [target_col]).copy()
 val_df = val_df.dropna(subset=features + [target_col]).copy()
 test_df = test_df.dropna(subset=features + [target_col]).copy()
@@ -80,6 +114,7 @@ required_param_keys = {
     'contamination',
     'changepoint_prior_scale',
     'seasonality_prior_scale',
+    'n_changepoints',
     'learning_rate',
     'max_depth',
     'num_leaves',
@@ -140,19 +175,20 @@ logger.addHandler(logging.NullHandler())
 logger.propagate = False
 logger.setLevel(logging.CRITICAL)
 
-df_prophet_val_proxy = val_df[['Date']].rename(columns={'Date': 'ds'})
+df_prophet_val_proxy = val_df[['Date', 'Avg_Temp']].rename(columns={'Date': 'ds'})
 
 def objective(trial):
     # 1. Suggest joint parameters
     contamination = trial.suggest_float('contamination', 0.001, 0.05, log=True)
-    cps = trial.suggest_float('changepoint_prior_scale', 0.01, 0.5, log=True)
+    cps = trial.suggest_float('changepoint_prior_scale', 0.01, 1.0, log=True)
     sps = trial.suggest_float('seasonality_prior_scale', 0.1, 10.0, log=True)
+    n_cp = trial.suggest_int('n_changepoints', 25, 50)
     
-    lgb_lr = trial.suggest_float('learning_rate', 0.01, 0.1, log=True)
-    lgb_depth = trial.suggest_int('max_depth', 3, 7)
-    lgb_leaves = trial.suggest_int('num_leaves', 15, 63)
-    lgb_subsample = trial.suggest_float('subsample', 0.7, 1.0)
-    lgb_colsample = trial.suggest_float('colsample_bytree', 0.7, 1.0)
+    lgb_lr = trial.suggest_float('learning_rate', 0.005, 0.15, log=True)
+    lgb_depth = trial.suggest_int('max_depth', 4, 10)
+    lgb_leaves = trial.suggest_int('num_leaves', 31, 127)
+    lgb_subsample = trial.suggest_float('subsample', 0.6, 1.0)
+    lgb_colsample = trial.suggest_float('colsample_bytree', 0.6, 1.0)
     
     # 2. Anomaly Detection + Imputation (IQR + Isolation Forest)
     #    Instead of removing anomalous rows (which creates holes),
@@ -181,9 +217,10 @@ def objective(trial):
             # Fallback: use global training mean if no clean data in window
             temp_train_clean.iloc[idx, temp_train_clean.columns.get_loc(target_col)] = train_df[target_col].mean()
         
-    # 3. Base Prophet
-    df_prophet_temp = temp_train_clean[['Date', target_col]].rename(columns={'Date': 'ds', target_col: 'y'})
-    m_base = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False, changepoint_prior_scale=cps, seasonality_prior_scale=sps)
+    # 3. Base Prophet (with temperature regressor for weather-driven demand)
+    df_prophet_temp = temp_train_clean[['Date', target_col, 'Avg_Temp']].rename(columns={'Date': 'ds', target_col: 'y'})
+    m_base = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False, changepoint_prior_scale=cps, seasonality_prior_scale=sps, n_changepoints=n_cp)
+    m_base.add_regressor('Avg_Temp')
     m_base.fit(df_prophet_temp)
     
     temp_train_clean['Prophet_Pred'] = m_base.predict(df_prophet_temp)['yhat'].values
@@ -204,7 +241,7 @@ def objective(trial):
     lgb_model = lgb.LGBMRegressor(
         learning_rate=lgb_lr, max_depth=lgb_depth, num_leaves=lgb_leaves, 
         subsample=lgb_subsample, colsample_bytree=lgb_colsample,
-        n_estimators=1000, random_state=42, n_jobs=-1, verbose=-1
+        n_estimators=2000, random_state=42, n_jobs=-1, verbose=-1
     )
     
     lgb_model.fit(
@@ -310,40 +347,54 @@ plt.savefig(anomaly_plot_path, dpi=300)
 plt.close()
 print(f"   Saved Anomaly Visualization: {anomaly_plot_path}")
 
-# 2. Final Prophet Training
-df_prophet_train = train_df_clean[['Date', target_col]].rename(columns={'Date': 'ds', target_col: 'y'})
+# 2. Final Prophet Training (with temperature regressor)
+#    Train on train+val combined for maximum data exposure to the test set
+df_prophet_full = pd.concat([
+    train_df_clean[['Date', target_col, 'Avg_Temp']],
+    val_df[['Date', target_col, 'Avg_Temp']]
+]).rename(columns={'Date': 'ds', target_col: 'y'})
 prophet_model = Prophet(
     yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False,
     changepoint_prior_scale=best_p['changepoint_prior_scale'], 
-    seasonality_prior_scale=best_p['seasonality_prior_scale']
+    seasonality_prior_scale=best_p['seasonality_prior_scale'],
+    n_changepoints=best_p['n_changepoints']
 )
-prophet_model.fit(df_prophet_train)
+prophet_model.add_regressor('Avg_Temp')
+prophet_model.fit(df_prophet_full)
 
 for split_df in [train_df_clean, train_df, val_df, test_df]:
-    future = split_df[['Date']].rename(columns={'Date': 'ds'})
+    future = split_df[['Date', 'Avg_Temp']].rename(columns={'Date': 'ds'})
     split_df['Prophet_Pred'] = prophet_model.predict(future)['yhat'].values
 
-# 3. Final LightGBM Training
+# 3. Final LightGBM Training (Residual Correction)
+#    Train on train+val combined for maximum data exposure.
+#    Use last 15% of combined set as early-stopping signal.
 train_df_clean['Prophet_Residual'] = train_df_clean[target_col] - train_df_clean['Prophet_Pred']
 train_df['Prophet_Residual'] = train_df[target_col] - train_df['Prophet_Pred']
 val_df['Prophet_Residual'] = val_df[target_col] - val_df['Prophet_Pred']
 test_df['Prophet_Residual'] = test_df[target_col] - test_df['Prophet_Pred']
 
-X_train = train_df_clean[features]
-y_train_residuals = train_df_clean['Prophet_Residual']
-X_val = val_df[features]
-y_val_residuals = val_df['Prophet_Residual']
+# Combine train + val for final model
+final_train = pd.concat([train_df_clean, val_df]).reset_index(drop=True)
+es_cutoff = int(len(final_train) * 0.85)
+final_train_main = final_train.iloc[:es_cutoff]
+final_train_es   = final_train.iloc[es_cutoff:]
+
+X_train_final = final_train_main[features]
+y_train_final = final_train_main['Prophet_Residual']
+X_es = final_train_es[features]
+y_es = final_train_es['Prophet_Residual']
 
 model_lgb = lgb.LGBMRegressor(
     learning_rate=best_p['learning_rate'], max_depth=best_p['max_depth'], 
     num_leaves=best_p['num_leaves'], subsample=best_p['subsample'], 
     colsample_bytree=best_p['colsample_bytree'],
-    n_estimators=5000, random_state=42, n_jobs=-1, verbose=-1
+    n_estimators=10000, random_state=42, n_jobs=-1, verbose=-1
 )
 
 model_lgb.fit(
-    X_train, y_train_residuals,
-    eval_set=[(X_val, y_val_residuals)],
+    X_train_final, y_train_final,
+    eval_set=[(X_es, y_es)],
     callbacks=[
         lgb.early_stopping(stopping_rounds=50, verbose=False),
         lgb.log_evaluation(period=0)
