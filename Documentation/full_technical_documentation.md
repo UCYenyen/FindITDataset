@@ -1,7 +1,7 @@
 # Dokumentasi Teknis Lengkap: Castricity — Hybrid AI Electricity Demand Forecasting
 
 > **Proyek:** FindIT 2026 Hackathon · Tim Nekat Aja  
-> **Versi Terakhir Diperbarui:** 6 April 2026  
+> **Versi Terakhir Diperbarui:** 10 April 2026  
 > **Bahasa:** Bahasa Indonesia (dengan terminologi teknis Inggris)
 
 ---
@@ -17,11 +17,12 @@
 7. [Arsitektur Model Hybrid (`hybrid_model.py`)](#7-arsitektur-model-hybrid-hybrid_modelpy)
 8. [Deteksi Anomali & Strategi Imputasi (Bukan Penghapusan)](#8-deteksi-anomali--strategi-imputasi-bukan-penghapusan)
 9. [Joint Bayesian Optimization (Optuna)](#9-joint-bayesian-optimization-optuna)
-10. [Evaluasi Kinerja Model](#10-evaluasi-kinerja-model)
-11. [Explainable AI (XAI) — SHAP Values](#11-explainable-ai-xai--shap-values)
-12. [Dashboard Interaktif (`dashboard.py`)](#12-dashboard-interaktif-dashboardpy)
-13. [Artefak Output yang Dihasilkan](#13-artefak-output-yang-dihasilkan)
-14. [Cara Menjalankan Proyek](#14-cara-menjalankan-proyek)
+10. [Anti-Overfitting Architecture: Train-Only Strategy](#10-anti-overfitting-architecture-train-only-strategy)
+11. [Evaluasi Kinerja Model](#11-evaluasi-kinerja-model)
+12. [Explainable AI (XAI) — SHAP Values](#12-explainable-ai-xai--shap-values)
+13. [Dashboard Interaktif (`dashboard.py`)](#13-dashboard-interaktif-dashboardpy)
+14. [Artefak Output yang Dihasilkan](#14-artefak-output-yang-dihasilkan)
+15. [Cara Menjalankan Proyek](#15-cara-menjalankan-proyek)
 
 ---
 
@@ -31,11 +32,16 @@ Castricity adalah platform prediksi permintaan listrik regional Indonesia berbas
 
 | Komponen | Library | Peran |
 |:---|:---|:---|
-| **Forecaster** | Prophet (Meta) | Menangkap pola waktu: tren tahunan, musiman mingguan, & efek hari libur nasional |
-| **Regressor** | LightGBM (Microsoft) | Mempelajari residual (kesalahan) Prophet dari faktor eksogen: cuaca, lag, dll. |
+| **Forecaster** | Prophet (Meta) | Menangkap pola waktu: tren tahunan, musiman mingguan. Dilatih **hanya pada train data**. |
+| **Regressor** | LightGBM (Microsoft) | Mempelajari residual (kesalahan) Prophet dari 18 fitur eksogen. Dilatih **hanya pada train data**, val = held-out early-stop. |
 | **Guardrail** | Isolation Forest (scikit-learn) | Mendeteksi anomali & **mengimputasi** data abnormal agar dataset tetap utuh tanpa lubang |
 
 Seluruh hyperparameter ketiga komponen di atas dioptimasi secara **simultan** menggunakan **Optuna Bayesian Optimization**, bukan secara terpisah.
+
+**Prinsip Desain Utama:**
+- **Train-Only Architecture**: Tidak ada model yang melihat data validasi atau test saat training.
+- **Regularisasi Berlapis**: L1/L2, shallow trees, extra_trees, min_child_samples.
+- **3-Split Evaluation**: Memisahkan diagnosa overfitting (Train→Val) dari distribution shift (Val→Test).
 
 ---
 
@@ -55,6 +61,10 @@ Dataset/
 │   ├── build_real_datasets.py        # Membangun dataset harian & bulanan dari raw data
 │   └── hybrid_model.py              # Pipeline utama: training + evaluasi + export
 │
+├── Notebook/
+│   ├── training.ipynb                # Notebook training (mirror dari hybrid_model.py)
+│   └── inference.ipynb               # Notebook inferensi + SHAP Explainability
+│
 ├── Documentation/                    # Dokumentasi proyek
 │   ├── full_technical_documentation.md   # ← FILE INI
 │   ├── AI_Project_Documentation.md       # Metodologi AI (Bab 2)
@@ -65,6 +75,7 @@ Dataset/
 │   ├── prophet_model.joblib          # Model Prophet terlatih
 │   ├── lgbm_model.joblib             # Model LightGBM terlatih
 │   ├── iso_forest.joblib             # Model Isolation Forest terlatih
+│   ├── knn_imputer.joblib            # KNN Imputer (fitted on train)
 │   └── best_hybrid_params.json       # Hyperparameter terbaik dari Optuna
 │
 ├── Outputs/                          # Dataset olahan & visualisasi
@@ -194,7 +205,7 @@ Total variasi gabungan ~6–8% memaksa model belajar generalisasi dari pola nyat
 
 ## 5. Fitur-Fitur Dataset (Feature Dictionary)
 
-### 5.1 Dataset Harian
+### 5.1 Dataset Harian (18 Fitur untuk LightGBM)
 
 | Kolom | Tipe | Deskripsi | Asal |
 |:---|:---|:---|:---|
@@ -204,7 +215,7 @@ Total variasi gabungan ~6–8% memaksa model belajar generalisasi dari pola nyat
 | `Is_Weekend` | Integer | 1=Sabtu/Minggu, 0=hari kerja | Filter dari `Date` |
 | `Is_Holiday` | Integer | 1=Libur Nasional, 0=bukan | JSON holidays (guangrei) |
 | `Month`, `DayOfYear`, `WeekOfYear` | Integer | Siklus Temporal & Kalenderisasi | Dihitung dari `Date` |
-| `Trend` | Integer | Penanda hari linier berjalannya waktu sejak hari pertama dataset | Dihitung dari `Date` |
+| `Trend` | Integer | Hari ke-N sejak 2018-01-01 (pertumbuhan linier) | Dihitung dari `Date` |
 | `Avg_Temp` | Float | Suhu rata-rata nasional harian (°C) | Kaggle/BMKG `climate_data.csv` |
 | `Rainfall` | Float | Curah hujan rata-rata harian (mm) | Kaggle/BMKG `climate_data.csv` |
 | `Temp_Lag_1` | Float | Suhu historis H-1 | Feature engineering |
@@ -220,7 +231,6 @@ Total variasi gabungan ~6–8% memaksa model belajar generalisasi dari pola nyat
 | `Demand_GWh` | Float | **TARGET** — total demand bulanan (GWh) | Agregasi dari `Demand_MWh` |
 | `GDP` | Float | PDB Indonesia (Miliar USD) | World Bank (`NY.GDP.MKTP.CD`) |
 | `Population` | Float | Populasi Indonesia | World Bank (`SP.POP.TOTL`) |
-| `Industrial_Index` | Float | Indeks industri sintetis | Distribusi normal sintetis |
 | `Avg_Temp` | Float | Rata-rata suhu bulanan | Agregasi dari harian |
 | `Lag_1` | Float | Demand 1 bulan sebelumnya | Feature engineering |
 | `Lag_12` | Float | Demand 12 bulan sebelumnya (YoY) | Feature engineering |
@@ -232,19 +242,19 @@ Total variasi gabungan ~6–8% memaksa model belajar generalisasi dari pola nyat
 
 ### 6.1 Library Inti Model
 
-| Library | Versi | Alasan Penggunaan |
-|:---|:---|:---|
-| **`prophet`** (Meta/Facebook) | — | Secara native memahami pola musiman (weekly, yearly seasonality) dan efek hari libur. Tidak memerlukan feature engineering manual untuk tren waktu. Sangat kuat terhadap data kalender Indonesia yang memiliki sistem Hijriah (tanggal Lebaran bergeser tiap tahun). |
-| **`lightgbm`** (Microsoft) | — | Algoritma gradient boosting tree tercepat untuk dataset tabular berukuran sedang. Lebih cepat dari XGBoost, lebih sensitif terhadap angka desimal kecil (penting untuk cuaca), dan kompatibel penuh dengan SHAP. Digunakan untuk mempelajari residual (kesalahan) Prophet. |
-| **`scikit-learn`** | — | Menyediakan `IsolationForest` untuk deteksi anomali, serta metrik evaluasi (`mean_squared_error`, `mean_absolute_error`, `precision_score`, `recall_score`, `f1_score`). Juga `TimeSeriesSplit` untuk cross-validation time-series. |
-| **`optuna`** | — | Framework Bayesian Optimization state-of-the-art yang menggunakan `TPESampler` (Tree-structured Parzen Estimator). Jauh lebih efisien dari grid search karena memfokuskan pencarian di area parameter space yang menjanjikan. Digunakan untuk mengoptimasi hyperparameter **semua 3 model secara simultan** dalam satu objective function. |
-| **`shap`** | — | Library Explainable AI (XAI) yang menghitung kontribusi setiap fitur terhadap prediksi model. `TreeExplainer` khusus dioptimalkan untuk model tree-based seperti LightGBM. Menghasilkan SHAP summary plot untuk interpretasi global dan local explanation per prediksi. |
+| Library | Alasan Penggunaan |
+|:---|:---|
+| **`prophet`** (Meta/Facebook) | Secara native memahami pola musiman (weekly, yearly seasonality). Tidak memerlukan feature engineering manual untuk tren waktu. Kuat terhadap pergeseran tanggal Hijriah. Menggunakan `Avg_Temp` sebagai exogenous regressor. |
+| **`lightgbm`** (Microsoft) | Algoritma gradient boosting tree tercepat untuk dataset tabular berukuran sedang. Mendukung `extra_trees` mode untuk regularisasi tambahan. Kompatibel penuh dengan SHAP untuk explainability. Digunakan untuk mempelajari residual Prophet. |
+| **`scikit-learn`** | Menyediakan `IsolationForest` untuk deteksi anomali, `KNNImputer` untuk imputasi missing values, serta metrik evaluasi (`mean_squared_error`, `mean_absolute_error`, `precision_score`, `recall_score`, `f1_score`). |
+| **`optuna`** | Framework Bayesian Optimization state-of-the-art — `TPESampler` (Tree-structured Parzen Estimator). Jauh lebih efisien dari grid search. Digunakan untuk mengoptimasi hyperparameter **semua 3 model secara simultan** dalam satu objective function. |
+| **`shap`** | Library Explainable AI (XAI) yang menghitung kontribusi setiap fitur. `TreeExplainer` khusus dioptimalkan untuk model tree-based. Menghasilkan summary plot, waterfall plot, force plot, dan dependence plot. |
 
 ### 6.2 Library Pemrosesan Data
 
 | Library | Alasan Penggunaan |
 |:---|:---|
-| **`pandas`** | Manipulasi DataFrame: membaca CSV, merge, groupby, interpolasi temporal, feature engineering lag/rolling, export CSV. |
+| **`pandas`** | Manipulasi DataFrame: membaca CSV, merge, groupby, feature engineering lag/rolling, export CSV. |
 | **`numpy`** | Operasi numerik: noise stokastik Gaussian, masking boolean, perhitungan metrik MAPE manual, IQR bounds. |
 
 ### 6.3 Library Visualisasi
@@ -258,18 +268,9 @@ Total variasi gabungan ~6–8% memaksa model belajar generalisasi dari pola nyat
 
 | Library | Alasan Penggunaan |
 |:---|:---|
-| **`joblib`** | Serialisasi model (save/load) ke format `.joblib`. Lebih cepat dari `pickle` untuk objek numpy/sklearn besar. Dipakai untuk menyimpan `prophet_model`, `lgbm_model`, dan `iso_forest`. |
-| **`streamlit`** | Framework dashboard web interaktif. Memungkinkan pembuatan UI prediksi tanpa menulis HTML/CSS/JS. Digunakan untuk `dashboard.py`. |
-| **`holidays`** | Library Python yang menyediakan daftar hari libur nasional per negara. `holidays.Indonesia()` dipakai di dashboard untuk auto-deteksi apakah tanggal input adalah libur nasional. |
-
-### 6.5 Library Utilitas
-
-| Library | Alasan Penggunaan |
-|:---|:---|
-| **`os`**, **`json`**, **`glob`** | File system: path resolution, baca/tulis JSON, pencarian file wildcard. |
-| **`warnings`** | Menyembunyikan warning yang tidak relevan (convergence, deprecation). |
-| **`logging`** | Menekan output verbose dari `cmdstanpy` (backend Prophet) agar log tidak penuh. |
-| **`itertools`** | Imported tapi tidak secara aktif digunakan di versi terkini. |
+| **`joblib`** | Serialisasi model (save/load) ke format `.joblib`. Lebih cepat dari `pickle` untuk objek numpy/sklearn besar. Menyimpan `prophet_model`, `lgbm_model`, `iso_forest`, dan `knn_imputer`. |
+| **`streamlit`** | Framework dashboard web interaktif. Memungkinkan pembuatan UI prediksi tanpa menulis HTML/CSS/JS. |
+| **`holidays`** | Library Python yang menyediakan daftar hari libur nasional per negara. `holidays.Indonesia()` dipakai di dashboard untuk auto-deteksi hari libur. |
 
 ---
 
@@ -280,68 +281,59 @@ Total variasi gabungan ~6–8% memaksa model belajar generalisasi dari pola nyat
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                        STEP 1: DATA INGESTION                           │
-│   Baca dataset_daily_processed.csv → parse tanggal                     │
+│   Baca train/val/test CSV → parse tanggal                              │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                    STEP 2: KNN IMPUTATION (ZERO-LEAKAGE)                │
-│   Pengisian nilai kosong menggunakan Machine Learning KNNImputer yang  │
-│   hanya dilatih pada data historis Train. Mengisi pola cuaca dan gaps  │
-│   secara presisi.                                                      │
+│   KNNImputer fit STRICTLY on train → transform all splits              │
+│   Export knn_imputer.joblib untuk inference                            │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                      STEP 3: FEATURE ENGINEERING MODULE                 │
-│   Ekspansi 18 fitur: Month, DayOfYear, IsHoliday, Avg_Temp, Rainfall,  │
-│   Temp_Lag_1, Lags (1, 2, 7, 14, 30), Rolling_Means (7, 14, 30)        │
-│   Hapus observasi yang mengandung NaN akibat Auto-Regressive cut-off   │
+│                      STEP 3: FEATURE ENGINEERING (18 FEATURES)          │
+│   Month, DayOfYear, WeekOfYear, Trend, Lag_2, Lag_14,                  │
+│   Rolling_14, Rolling_30, Temp_Lag_1                                    │
+│   (ditambahkan ke fitur yang sudah ada dari build script)              │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                 STEP 4: TRAIN/VAL/TEST SPLIT (70/15/15)                 │
-│   Kronologis murni — TIDAK di-shuffle                                  │
-│   Train: 70% data pertama                                              │
-│   Validation: 15% berikutnya                                           │
-│   Test: 15% terakhir                                                   │
-└───────────────────────────────┬──────────────────────────────────────────┘
-                                ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│          STEP 5: JOINT BAYESIAN OPTIMIZATION (OPTUNA)                   │
-│   30 trials TPESampler — optimasi simultan:                            │
-│   • contamination (Isolation Forest)                                    │
-│   • changepoint_prior_scale & seasonality_prior_scale (Prophet)        │
-│   • learning_rate, max_depth, num_leaves, subsample, colsample (LGBM) │
+│         STEP 4: JOINT BAYESIAN OPTIMIZATION (OPTUNA, 50 Trials)        │
+│   TPESampler seed=0 — optimasi SIMULTAN 12 hyperparameter:             │
+│   • contamination (IF)                                                  │
+│   • changepoint_prior_scale, seasonality_prior_scale, n_changepoints   │
+│   • learning_rate, max_depth, num_leaves, subsample, colsample_bytree  │
+│   • min_child_samples, reg_alpha, reg_lambda                           │
 │   Objective: minimize MAE pada validation set                          │
-│   (Lihat Bagian 9 untuk detail lengkap)                                │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│            STEP 6: FINAL ARCHITECTURE TRAINING                          │
+│            STEP 5: FINAL ARCHITECTURE TRAINING (TRAIN-ONLY)             │
 │                                                                         │
-│   6a. ANOMALY DETECTION + IMPUTATION                                    │
-│       IsolationForest + IQR → mendeteksi anomali                       │
-│       Anomali TIDAK dihapus, melainkan DIIMPUTASI                       │
-│       dengan rata-rata 7 hari terakhir data bersih                     │
-│       (Lihat Bagian 8 untuk detail lengkap)                             │
+│   5a. ANOMALY DETECTION + IMPUTATION                                    │
+│       IsolationForest(n_estimators=300) + IQR → detect anomalies       │
+│       Anomali DIIMPUTASI with 7-day clean mean (NOT removed)           │
 │                                                                         │
-│   6b. PROPHET TRAINING                                                  │
-│       Input: data yang sudah diimputasi (gap-free)                     │
-│       Konfigurasi: yearly + weekly seasonality, no daily               │
-│       Output: Prophet_Pred untuk semua split                           │
+│   5b. PROPHET TRAINING (TRAIN-ONLY)                                    │
+│       Input: train_df_clean ONLY                                        │
+│       Regressor: Avg_Temp                                               │
+│       Output: Prophet_Pred for ALL splits (train, val, test)           │
+│       Val & Test = FULLY OUT-OF-SAMPLE                                  │
 │                                                                         │
-│   6c. LIGHTGBM RESIDUAL TRAINING                                       │
-│       Residual = Demand_MWh - Prophet_Pred                             │
-│       LightGBM belajar memprediksi residual dari fitur eksogen         │
-│       Early stopping: 50 rounds pada validation set                    │
-│       Output: LGBM_Residual_Pred                                       │
+│   5c. LIGHTGBM RESIDUAL TRAINING (TRAIN-ONLY, Val = held-out)          │
+│       Train on: train_df_clean residuals ONLY                           │
+│       Early stop on: val_df residuals (NEVER trained on)                │
+│       n_estimators=800, extra_trees=True                                │
+│       Regularised: reg_alpha, reg_lambda, min_child_samples            │
 │                                                                         │
-│   6d. FINAL PREDICTION                                                  │
+│   5d. FINAL PREDICTION                                                  │
 │       Final_Pred = Prophet_Pred + LGBM_Residual_Pred                   │
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│              STEP 7: EVALUATION & EXPORT                                │
-│   Metrik: MAE, RMSE, MAPE pada Validation & Test set                  │
+│              STEP 6: 3-SPLIT EVALUATION & DIAGNOSTICS                   │
+│   Train (in-sample) / Val (out-of-sample) / Test (out-of-sample)       │
+│   Diagnostics: Overfitting (Train→Val Gap) vs Dist Shift (Val→Test)    │
 │   Export: model .joblib, predictions CSV, visualisasi PNG              │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -352,7 +344,7 @@ Konsumsi listrik di Indonesia dipengaruhi oleh **dua poros yang saling bertolak-
 
 1. **Poros Temporal (Waktu Kalender):** Listrik sangat patuh terhadap jam kerja, hari libur nasional (Idul Fitri, Natal), dan musim. **Prophet** secara spesifik didesain untuk menangkap pola ini.
 
-2. **Poros Kausalitas (Lingkungan & Makro):** Suhu panas akibat El Niño memicu pemakaian AC ekstrem. Pertumbuhan GDP memicu pabrik baru. **LightGBM** menangkap variasi ini melalui fitur eksogen.
+2. **Poros Kausalitas (Lingkungan & Eksogen):** Suhu panas memicu pemakaian AC ekstrem. Curah hujan mempengaruhi kebutuhan pendinginan. **LightGBM** menangkap variasi ini melalui 18 fitur eksogen.
 
 Tidak ada satu model yang bisa menangani keduanya secara optimal. Oleh karena itu, kita memisah tugas (**decoupling**):
 - Prophet menangani baseline temporal → menghasilkan prediksi dasar
@@ -369,17 +361,16 @@ Prophet(
     yearly_seasonality=True,    # Menangkap pola tahunan (musim kemarau/hujan)
     weekly_seasonality=True,    # Menangkap pola hari kerja vs akhir pekan
     daily_seasonality=False,    # TIDAK diaktifkan — data kita sudah level harian
-    changepoint_prior_scale=...,  # Dari Optuna — mengontrol fleksibilitas tren
-    seasonality_prior_scale=...,  # Dari Optuna — mengontrol amplitudo musiman
+    changepoint_prior_scale=...,  # Dari Optuna (0.001–0.1) — tren SANGAT halus
+    seasonality_prior_scale=...,  # Dari Optuna (0.01–1.0) — musiman terkontrol
+    n_changepoints=...,           # Dari Optuna (5–20) — sedikit perubahan tren
 )
+prophet_model.add_regressor('Avg_Temp')  # Suhu sebagai regressor eksogen
 ```
 
-**Input:** DataFrame 2 kolom: `ds` (tanggal) dan `y` (demand MWh)  
-**Output:** Kolom `yhat` — prediksi baseline temporal
+**Training Data:** `train_df_clean` ONLY (tidak pernah melihat val atau test).
 
-**Hyperparameter yang Di-tune Optuna:**
-- `changepoint_prior_scale` (0.01–0.5): Semakin besar = tren lebih fleksibel (bisa berubah tajam). Semakin kecil = tren lebih mulus.
-- `seasonality_prior_scale` (0.1–10.0): Semakin besar = amplitudo musiman lebih besar.
+**Output:** Kolom `yhat` — prediksi baseline temporal. Prediksi dihasilkan untuk semua split (train, val, test), namun val dan test adalah **fully out-of-sample**.
 
 ### 7.4 Detail Komponen LightGBM
 
@@ -390,32 +381,42 @@ Prophet(
 **Konfigurasi:**
 ```python
 LGBMRegressor(
-    learning_rate=...,      # Dari Optuna (0.01–0.1)
-    max_depth=...,          # Dari Optuna (3–7)
-    num_leaves=...,         # Dari Optuna (15–63)
-    subsample=...,          # Dari Optuna (0.7–1.0)
-    colsample_bytree=...,   # Dari Optuna (0.7–1.0)
-    n_estimators=5000,      # Jumlah pohon maksimal (dikontrol early stopping)
+    learning_rate=...,      # Dari Optuna (0.001–0.05) — konvergensi lambat & stabil
+    max_depth=...,          # Dari Optuna (2–4) — pohon SANGAT dangkal
+    num_leaves=...,         # Dari Optuna (4–15) — daun SANGAT sedikit
+    subsample=...,          # Dari Optuna (0.4–0.8) — stochastic subsampling
+    colsample_bytree=...,   # Dari Optuna (0.4–0.8) — feature subsampling
+    min_child_samples=...,  # Dari Optuna (15–60) — minimum sampel per leaf
+    reg_alpha=...,          # Dari Optuna (0.01–10.0) — L1 regularisasi
+    reg_lambda=...,         # Dari Optuna (0.01–10.0) — L2 regularisasi
+    n_estimators=800,       # Cap jumlah pohon (early stopping biasanya berhenti lebih awal)
+    extra_trees=True,       # Random threshold splitting untuk generalisasi
     random_state=42,        # Reproducibility
     n_jobs=-1,              # Gunakan semua CPU cores
     verbose=-1,             # Tidak ada output log
 )
 ```
 
-**Early Stopping:** Training berhenti jika selama 50 iterasi berturut-turut tidak ada peningkatan pada validation set. Ini mencegah **overfitting**.
+**Training:** `train_df_clean` ONLY. `val_df` hanya untuk early-stopping (50 rounds).
 
-**Fitur Input yang Digunakan:**
-| Fitur | Mengapa Penting |
-|:---|:---|
-| `Day_of_Week` | Pola hari kerja vs weekend |
-| `Is_Weekend` | Penurunan beban weekend |
-| `Is_Holiday` | Penurunan beban hari libur |
-| `Avg_Temp` | Suhu tinggi → AC → demand naik |
-| `Rainfall` | Hujan → suhu turun → AC berkurang |
-| `Lag_1` | Inersia konsumsi 1 hari sebelumnya |
-| `Lag_7` | Pola mingguan berulang |
-| `Lag_30` | Pola bulanan |
-| `Rolling_7` | Tren halus jangka pendek |
+**Fitur Input yang Digunakan (18 Fitur):**
+| Kategori | Fitur | Mengapa Penting |
+|:---|:---|:---|
+| Kalender | `Day_of_Week` | Pola hari kerja vs weekend |
+| Kalender | `Is_Weekend` | Penurunan beban weekend (industri tutup) |
+| Kalender | `Is_Holiday` | Penurunan beban hari libur nasional |
+| Temporal | `Month` | Pola musiman bulanan |
+| Temporal | `DayOfYear` | Posisi dalam siklus tahunan |
+| Temporal | `WeekOfYear` | Posisi dalam siklus mingguan |
+| Temporal | `Trend` | Pertumbuhan demand jangka panjang |
+| Cuaca | `Avg_Temp` | Suhu tinggi → AC → demand naik |
+| Cuaca | `Rainfall` | Hujan → suhu turun → demand turun |
+| Cuaca | `Temp_Lag_1` | Retensi panas inersia bangunan |
+| Autoregresif | `Lag_1`, `Lag_2` | Inersia konsumsi harian |
+| Autoregresif | `Lag_7` | Pola mingguan berulang |
+| Autoregresif | `Lag_14`, `Lag_30` | Pola dua-mingguan dan bulanan |
+| Rolling | `Rolling_7` | Tren halus 1 minggu |
+| Rolling | `Rolling_14`, `Rolling_30` | Tren halus 2/4 minggu |
 
 ---
 
@@ -423,21 +424,13 @@ LGBMRegressor(
 
 ### 8.1 Masalah Awal: Penghapusan Data Menciptakan Lubang
 
-Implementasi awal mendeteksi anomali menggunakan IsolationForest + IQR, lalu **menghapus** baris yang dianggap anomali dari dataset training:
-
-```python
-# ❌ PENDEKATAN LAMA — Menghapus baris anomali
-train_df_clean = train_df[(train_anomalies != -1) & (iqr_anomalies != -1)].copy()
-```
-
-**Masalah:** Menghapus baris menyebabkan **lubang (gaps)** dalam time series. Ini merusak fitur-fitur lag (`Lag_1`, `Lag_7`, `Lag_30`) dan `Rolling_7` yang bergantung pada data kontinu. Jika baris tanggal 15 Maret dihapus, maka `Lag_1` untuk tanggal 16 Maret menunjuk ke nilai yang salah.
+Implementasi awal mendeteksi anomali lalu **menghapus** baris anomali. Ini menyebabkan **lubang (gaps)** dalam time series yang merusak fitur-fitur lag dan rolling.
 
 ### 8.2 Solusi: Imputasi dengan Rata-rata 7 Hari Terakhir
 
-Pendekatan saat ini **tidak menghapus** baris apa pun. Sebaliknya, nilai anomali **diganti (diimputasi)** dengan rata-rata dari data bersih dalam jendela 7 hari ke belakang:
+Pendekatan saat ini **tidak menghapus** baris apa pun. Nilai anomali **diganti** dengan rata-rata dari data bersih dalam jendela 7 hari ke belakang:
 
 ```python
-# ✅ PENDEKATAN BARU — Imputasi, bukan penghapusan
 is_anomaly = (train_anomalies == -1) | (iqr_anomalies == -1)
 train_df_clean = train_df.copy()
 
@@ -451,27 +444,7 @@ for idx in np.where(is_anomaly)[0]:
         train_df_clean.iloc[idx, ...] = train_df[target_col].mean()
 ```
 
-### 8.3 Cara Kerja Imputasi Step-by-Step
-
-1. **Deteksi Anomali (2 Metode Gabungan):**
-   - **IsolationForest:** Algoritma berbasis pohon keputusan yang mengisolasi titik data. Data yang mudah diisolasi (sedikit split pohon) dianggap anomali (output: `-1`).
-   - **IQR (Interquartile Range):** Metode statistik klasik. Data di luar rentang `[Q1 - 1.5×IQR, Q3 + 1.5×IQR]` dianggap outlier.
-   - Sebuah titik dianggap anomali jika **salah satu** metode menandainya (OR logic).
-
-2. **Iterasi Setiap Titik Anomali:** Untuk setiap data point yang ditandai anomali:
-   - Cari 7 data point sebelumnya yang **bukan** anomali (clean data window)
-   - Hitung rata-rata (mean) dari data bersih tersebut
-   - Ganti nilai demand anomali dengan nilai rata-rata ini
-
-3. **Fallback:** Jika dalam jendela 7 hari ke belakang tidak ada data bersih sama sekali (kasus sangat jarang misalnya 7+ anomali berturut-turut), digunakan rata-rata global seluruh data training.
-
-### 8.4 Mengapa Rata-rata 7 Hari?
-
-- **7 hari = 1 siklus mingguan.** Konsumsi listrik mengikuti pola mingguan yang kuat (hari kerja vs akhir pekan). Menggunakan rata-rata 1 minggu menangkap siklus ini.
-- **Hanya data bersih** yang dimasukkan ke perhitungan mean — data anomali lain dalam jendela di-exclude agar noise tidak menyebar.
-- **Menjaga integritas temporal** — tidak ada baris yang dihapus, sehingga fitur `Lag_1`, `Lag_7`, `Lag_30`, dan `Rolling_7` tetap menunjuk ke tanggal yang benar.
-
-### 8.5 Perbandingan Pendekatan
+### 8.3 Perbandingan Pendekatan
 
 | Aspek | Penghapusan (Lama) | Imputasi (Sekarang) |
 |:---|:---|:---|
@@ -479,7 +452,6 @@ for idx in np.where(is_anomaly)[0]:
 | Integritas fitur lag | ❌ Rusak (gaps) | ✅ Terjaga |
 | Informasi temporal | ❌ Hilang | ✅ Terjaga |
 | Pengaruh ke Prophet | Data pelatihan lebih sedikit | **Data pelatihan lengkap** |
-| Kompleksitas | Sederhana (filter boolean) | Sedang (loop + lookback) |
 
 ---
 
@@ -487,7 +459,7 @@ for idx in np.where(is_anomaly)[0]:
 
 ### 9.1 Mengapa Tidak Grid Search?
 
-Grid search mengevaluasi **semua kombinasi** parameter secara brute-force. Dengan 8 hyperparameter yang perlu di-tune, grid search memerlukan ribuan evaluasi. Optuna menggunakan **TPESampler** (Tree-structured Parzen Estimator) yang secara cerdas memfokuskan pencarian di area yang menjanjikan — jauh lebih efisien.
+Grid search mengevaluasi **semua kombinasi** parameter secara brute-force. Dengan 12 hyperparameter, grid search memerlukan jutaan evaluasi. Optuna menggunakan **TPESampler** yang memfokuskan pencarian di area yang menjanjikan.
 
 ### 9.2 Mengapa Optimasi "Joint" (Simultan)?
 
@@ -495,20 +467,44 @@ Hyperparameter dari 3 komponen **saling mempengaruhi**:
 - Jika `contamination` tinggi → lebih banyak data diimputasi → Prophet melihat data berbeda → residual berubah → LightGBM harus beradaptasi
 - Jika Prophet terlalu fleksibel (`changepoint_prior_scale` tinggi) → residual lebih kecil → LightGBM kurang berguna
 
-Optimasi terpisah (tune Prophet sendiri, lalu tune LightGBM sendiri) **tidak menangkap interaksi ini**. Oleh karena itu, satu `objective()` function menjalankan **seluruh pipeline** (anomaly detection → Prophet → LightGBM) dan mengukur MAE akhir pada validation set.
+Satu `objective()` function menjalankan **seluruh pipeline** dan mengukur MAE akhir pada validation set.
 
-### 9.3 Parameter yang Di-optimasi
+### 9.3 Parameter yang Dioptimasi & Justifikasi Setiap Range
 
-| Parameter | Milik | Range | Skala | Dampak |
-|:---|:---|:---|:---|:---|
-| `contamination` | Isolation Forest | 0.001–0.05 | Log | Proporsi data yang dianggap anomali |
-| `changepoint_prior_scale` | Prophet | 0.01–0.5 | Log | Fleksibilitas tren (tinggi = lebih responsif) |
-| `seasonality_prior_scale` | Prophet | 0.1–10.0 | Log | Amplitudo efek musiman |
-| `learning_rate` | LightGBM | 0.01–0.1 | Log | Kecepatan belajar (rendah = stabil, lambat) |
-| `max_depth` | LightGBM | 3–7 | Linear | Kedalaman pohon (tinggi = lebih kompleks) |
-| `num_leaves` | LightGBM | 15–63 | Linear | Jumlah daun pohon |
-| `subsample` | LightGBM | 0.7–1.0 | Linear | Fraksi data per iterasi (regularisasi) |
-| `colsample_bytree` | LightGBM | 0.7–1.0 | Linear | Fraksi fitur per iterasi (regularisasi) |
+#### Isolation Forest
+
+| Parameter | Range | Skala | Justifikasi |
+|:---|:---|:---|:---|
+| `contamination` | 0.001–0.05 | Log | Anomali listrik jarang terjadi (0.1–5% data). Skala log karena sensitivitas tinggi di angka kecil — perbedaan antara 0.001 dan 0.01 jauh lebih signifikan daripada antara 0.01 dan 0.02. |
+
+#### Prophet (Diperketat untuk Anti-Overfitting)
+
+| Parameter | Range | Skala | Justifikasi |
+|:---|:---|:---|:---|
+| `changepoint_prior_scale` | **0.001–0.1** | Log | **Jauh lebih ketat dari default Prophet (0.05) dan range umum (0.01–0.5).** Nilai rendah memaksa tren bergerak sangat halus. Jika > 0.1, Prophet terlalu fleksibel — mengikuti noise harian alih-alih tren sesungguhnya, menyebabkan overfitting. Dengan noise stokastik ±6-8% di data kami, tren halus adalah pilihan yang tepat. |
+| `seasonality_prior_scale` | **0.01–1.0** | Log | **Jauh lebih ketat dari default Prophet (10.0).** Demand listrik memiliki seasonality yang konsisten dan relatif stabil. Amplitudo besar (>1.0) menyebabkan Prophet menangkap variasi noise sebagai "musiman", bukan pola sejati. |
+| `n_changepoints` | **5–20** | Linear | **Dikurangi dari range umum (25–50).** Semakin sedikit changepoint = tren lebih mulus. Dalam 6 tahun data (2018–2023), hanya ada ~3-4 perubahan struktural nyata per tahun (musim, Ramadan, COVID). 5–20 changepoint sudah cukup. |
+
+#### LightGBM (Regularisasi Berat untuk Anti-Overfitting)
+
+| Parameter | Range | Skala | Justifikasi |
+|:---|:---|:---|:---|
+| `learning_rate` | **0.001–0.05** | Log | **Sangat rendah** (umum: 0.01–0.3). Learning rate rendah berarti setiap pohon baru hanya membuat koreksi kecil. Dikombinasikan dengan early stopping (50 rounds), model berhenti di titik optimal — bukan di titik overfit. Skala log karena perbedaan antara 0.001 dan 0.01 lebih signifikan dari 0.01 dan 0.05. |
+| `max_depth` | **2–4** | Linear | **Sangat dangkal** (default: tidak terbatas, umum: 3–10). Pohon kedalaman 2 hanya bisa menangkap interaksi 2-fitur (misal: "jika hari kerja DAN suhu > 30°C"). Kedalaman 4 menangkap interaksi 4-fitur. Ini memaksa model fokus pada pola dominan dan mencegah menghafal noise kompleks. |
+| `num_leaves` | **4–15** | Linear | **Sangat sedikit** (default LightGBM: 31, umum: 15–127). Dengan hanya 4–15 daun per pohon, setiap "bin keputusan" mengandung banyak data → keputusan lebih robust. Mencegah daun kecil yang menangkap noise. |
+| `subsample` | **0.4–0.8** | Linear | **Cukup agresif** (umum: 0.7–1.0). Setiap pohon hanya melihat 40–80% data training secara random. Ini memaksa setiap pohon menjadi "ahli" di subset data berbeda — meningkatkan diversitas dan mengurangi overfitting. Mirip efek bagging di Random Forest. |
+| `colsample_bytree` | **0.4–0.8** | Linear | **Cukup agresif** (umum: 0.7–1.0). Setiap pohon hanya menggunakan 40–80% dari 18 fitur. Mencegah model terlalu bergantung pada 1-2 fitur dominan (misal: `Lag_1`). Mendorong model memanfaatkan fitur cuaca dan temporal juga. |
+| `min_child_samples` | **15–60** | Linear | Setiap daun harus memiliki minimal 15–60 data point. Ini mencegah daun yang mengandung terlalu sedikit data — yang biasanya menangkap noise unik, bukan pola umum. Angka 15 dipilih agar ~2 minggu data minimum; 60 agar ~2 bulan. |
+| `reg_alpha` (L1) | **0.01–10.0** | Log | **Regularisasi Lasso** — mendorong bobot fitur non-informatif menuju nol. Secara efektif melakukan _implicit feature selection_. Range log karena efek L1 sangat non-linear. |
+| `reg_lambda` (L2) | **0.01–10.0** | Log | **Regularisasi Ridge** — menekan semua bobot secara proporsional. Mencegah bobot yang terlalu besar pada fitur tertentu. Bekerja komplementer dengan L1: L1 menghilangkan fitur lemah, L2 menekan fitur kuat yang terlalu dominan. |
+
+#### Parameter Tetap (Non-Tuned)
+
+| Parameter | Nilai | Justifikasi |
+|:---|:---|:---|
+| `n_estimators` | **800** | Cap jumlah pohon maksimal. Dengan early stopping 50 rounds, training biasanya berhenti di 100–400 pohon. Cap 800 memberikan ruang untuk learning rate sangat rendah yang membutuhkan lebih banyak iterasi. Tidak 10000 karena itu mengundang overfitting. |
+| `extra_trees` | **True** | Menggunakan **random split threshold** alih-alih threshold optimal. Efek: setiap pohon sedikit lebih "acak" → variance lebih rendah → generalisasi lebih baik. Mirip konsep Extra Trees Classifier di scikit-learn. |
+| `early_stopping` | **50 rounds** (final) / **20 rounds** (Optuna) | Jika val error tidak membaik selama 50 iterasi berturut-turut, training dihentikan otomatis. Ini adalah pencegah overfitting paling fundamental — model berhenti begitu mulai "menghafal" alih-alih "belajar". Optuna menggunakan 20 rounds untuk efisiensi waktu pencarian. |
 
 ### 9.4 Caching & Retune Policy
 
@@ -520,86 +516,132 @@ Hasil Optuna disimpan di `Models/best_hybrid_params.json` dengan metadata:
 **Retune otomatis terjadi jika:**
 - File parameter tidak ditemukan
 - Parameter sudah lebih tua dari `RETUNE_EVERY_DAYS` (30 hari)
-- Environment variable `FORCE_RETUNE=1` diset manual
-
-**Jika parameter masih segar:**
-Optuna di-skip sepenuhnya dan parameter langsung di-load dari file — menghemat waktu eksekusi signifikan.
+- `FORCE_RETUNE = True` diset manual
 
 ---
 
-## 10. Evaluasi Kinerja Model
+## 10. Anti-Overfitting Architecture: Train-Only Strategy
 
-### 10.1 Data Split
+### 10.1 Masalah Sebelumnya
 
-| Split | Proporsi | Tujuan |
+Arsitektur sebelumnya melatih Prophet dan/atau LightGBM pada **gabungan train+val data**. Ini menyebabkan:
+
+1. **Val MAPE terlihat sangat baik** — karena model sudah MELIHAT data val saat training.
+2. **Test MAPE jauh lebih tinggi** — karena model belum pernah melihat data test.
+3. **Gap Val→Test besar** — yang *tampak* seperti overfitting, padahal sebagian besar adalah konsekuensi dari val yang tidak jujur.
+
+### 10.2 Solusi: Train-Only Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  TRAIN-ONLY ARCHITECTURE                     │
+├─────────────────────────────────────────────────────────────┤
+│  Split      │ Prophet Status    │ LightGBM Status           │
+│─────────────│───────────────────│───────────────────────────│
+│  Train      │ ✅ In-sample      │ ✅ In-sample              │
+│  Val        │ ❌ Out-of-sample  │ ❌ Out-of-sample          │
+│  Test       │ ❌ Out-of-sample  │ ❌ Out-of-sample          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **Prophet** dilatih HANYA pada `train_df_clean`. Val dan Test tidak pernah disentuh.
+- **LightGBM** dilatih HANYA pada residual `train_df_clean`. Val hanya digunakan sebagai _early-stopping monitor_ — data val DIBACA tapi TIDAK dilatih.
+- **Arsitektur final identik dengan arsitektur Optuna** — menghilangkan mismatch antara tuning dan deployment.
+
+### 10.3 Diagnosa 3-Split
+
+Dengan arsitektur ini, evaluasi terpisah pada 3 split memberikan diagnosa presisi:
+
+| Gap | Mengukur | Sehat Jika |
 |:---|:---|:---|
-| **Train** | 70% pertama | Melatih Prophet + LightGBM |
-| **Validation** | 15% berikutnya | Early stopping LightGBM + Optuna objective |
-| **Test** | 15% terakhir | Evaluasi akhir — TIDAK pernah dilihat saat training |
+| **Train→Val** | **Overfitting** — seberapa banyak performa turun pada data unseen | < 1.0 pp |
+| **Val→Test** | **Distribution Shift** — seberapa berbeda pola data test vs val | < 2.0 pp |
 
-Split dilakukan **kronologis** (tanpa shuffle) — penting untuk time series agar model tidak "melihat masa depan".
+Jika Train→Val kecil tapi Val→Test besar → bukan overfitting, melainkan **pola demand listrik di periode test genuinely berbeda** (COVID, perubahan ekonomi, dll). Ini bukan masalah model — ini realitas data.
 
-### 10.2 Metrik yang Digunakan
+---
+
+## 11. Evaluasi Kinerja Model
+
+### 11.1 Data Split
+
+| Split | Proporsi | Tujuan | Status untuk Prophet | Status untuk LightGBM |
+|:---|:---|:---|:---|:---|
+| **Train** | 70% pertama | Melatih kedua model | In-sample | In-sample |
+| **Validation** | 15% berikutnya | Early stopping LightGBM + Optuna objective | Out-of-sample | Out-of-sample (hanya monitor) |
+| **Test** | 15% terakhir | Evaluasi akhir — TIDAK pernah disentuh | Out-of-sample | Out-of-sample |
+
+### 11.2 Metrik yang Digunakan
 
 | Metrik | Formula | Interpretasi |
 |:---|:---|:---|
-| **MAE** (Mean Absolute Error) | `mean(\|actual - predicted\|)` | Rata-rata selisih absolut dalam MWh. Mudah dipahami: "rata-rata model meleset X MWh per hari." |
-| **RMSE** (Root Mean Squared Error) | `sqrt(mean((actual - predicted)²))` | Seperti MAE tapi memberi bobot lebih besar terhadap kesalahan besar. Sensitif terhadap outlier prediksi. |
-| **MAPE** (Mean Absolute Percentage Error) | `mean(\|actual - predicted\| / actual) × 100%` | Persentase kesalahan relatif. Target industri: MAPE < 10%. |
+| **MAE** | `mean(|actual - predicted|)` | "Model meleset rata-rata X MWh per hari." |
+| **RMSE** | `sqrt(mean((actual - predicted)²))` | Seperti MAE tapi mengutamakan kesalahan besar. |
+| **MAPE** | `mean(|actual - predicted| / actual) × 100%` | Persentase kesalahan relatif. Target: < 5%. |
 
-### 10.3 Output Perbandingan
-
-Pipeline mencetak tabel perbandingan **Prophet-Only vs Hybrid** pada kedua split (Validation & Test):
+### 11.3 Output Perbandingan (3-Row Format)
 
 ```
-========================================================================
+==================================================================================
   MODEL COMPARISON: Prophet-Only vs Hybrid (Prophet + LightGBM)
-========================================================================
-Metric       | Prophet-Only (Test)    | Hybrid (Test)
-------------------------------------------------------------------------
-MAE          |         XX,XXX MWh    |         XX,XXX MWh
-RMSE         |         XX,XXX MWh    |         XX,XXX MWh
-MAPE         |            X.XX%      |            X.XX%
-========================================================================
-```
+==================================================================================
+Metric       | Prophet-Only (Train)   | Hybrid (Train)         | Note
+----------------------------------------------------------------------------------
+MAE          |         X,XXX.XX MWh   |           XXX.XX MWh   | In-sample
+RMSE         |         X,XXX.XX MWh   |         X,XXX.XX MWh   |
+MAPE         |            X.XX%       |            X.XX%       |
+----------------------------------------------------------------------------------
+Metric       | Prophet-Only (Val)     | Hybrid (Val)           | Note
+----------------------------------------------------------------------------------
+MAE          |         X,XXX.XX MWh   |         X,XXX.XX MWh   | Out-of-sample
+RMSE         |        XX,XXX.XX MWh   |        XX,XXX.XX MWh   |
+MAPE         |            X.XX%       |            X.XX%       |
+----------------------------------------------------------------------------------
+Metric       | Prophet-Only (Test)    | Hybrid (Test)          | Note
+----------------------------------------------------------------------------------
+MAE          |        XX,XXX.XX MWh   |        XX,XXX.XX MWh   | Out-of-sample
+RMSE         |        XX,XXX.XX MWh   |        XX,XXX.XX MWh   |
+MAPE         |            X.XX%       |            X.XX%       |
+==================================================================================
 
-Serta persentase peningkatan Hybrid dibanding Prophet-Only.
+  >> Train→Val Gap:  X.XX pp  (Overfitting indicator)
+  >> Val→Test Gap:   X.XX pp  (Distribution Shift indicator)
+  >> OVERFIT CHECK:  ✅ Healthy / ⚠️ Mild / ❌ Significant
+  >> SHIFT CHECK:    ✅ Stable / ⚠️ Moderate / ❌ Large
+```
 
 ---
 
-## 11. Explainable AI (XAI) — SHAP Values
+## 12. Explainable AI (XAI) — SHAP Values
 
-### 11.1 Apa itu SHAP?
+### 12.1 Apa itu SHAP?
 
-**SHAP (SHapley Additive exPlanations)** berasal dari teori permainan kooperatif. SHAP mengukur **kontribusi marginal setiap fitur** terhadap prediksi model. Untuk setiap data point:
+**SHAP (SHapley Additive exPlanations)** berasal dari teori permainan kooperatif. SHAP mengukur **kontribusi marginal setiap fitur** terhadap prediksi model:
 
 `Prediksi = Base Value + SHAP(Fitur₁) + SHAP(Fitur₂) + ... + SHAP(Fiturₙ)`
 
-### 11.2 Mengapa Penting?
+### 12.2 Mengapa Penting?
 
-Tanpa XAI, model hanya berupa "black box" — kita tahu hasilnya tapi tidak tahu **mengapa**. Dengan SHAP:
-- Kita bisa membuktikan bahwa suhu 35°C berkontribusi +12% beban
-- Kita bisa menjelaskan bahwa hari libur menurunkan prediksi -15% beban
-- Juri hackathon bisa **mempercayai** model karena transparan
+Tanpa XAI, model hanya berupa "black box". Dengan SHAP:
+- Membuktikan bahwa suhu 35°C berkontribusi +12% beban
+- Menjelaskan bahwa hari libur menurunkan prediksi -15% beban
+- Juri hackathon dapat **memvalidasi** model secara transparan
 
-### 11.3 Implementasi
+### 12.3 Implementasi di Proyek
 
-**Global XAI** (di `hybrid_model.py`):
-```python
-explainer = shap.TreeExplainer(model_lgb)  # TreeExplainer khusus LGBM (cepat & exact)
-shap_values = explainer.shap_values(X_test)
-shap.summary_plot(shap_values, X_test, ...)  # Beeswarm plot semua fitur
-```
+**Inference Notebook (`inference.ipynb`) menyediakan 7 tipe analisis SHAP:**
 
-**Local XAI** (di `dashboard.py`):
-```python
-explainer = shap.TreeExplainer(lgbm_model)
-shap_vals = explainer.shap_values(custom_data)[0]  # SHAP untuk 1 data point
-```
+| Tipe | Fungsi |
+|:---|:---|
+| **Global Summary Plot** | Fitur paling berpengaruh secara keseluruhan (beeswarm plot) |
+| **Mean \|SHAP\| Ranking** | Importance ranking numerik per fitur |
+| **Tabel Korelasi Bisnis** | Terjemahan setiap fitur ke narasi bisnis |
+| **Single-Point Narrative** | Top-5 faktor penentu prediksi hari terakhir |
+| **Waterfall Plot** | Dekomposisi prediksi dari base value ke akhir |
+| **Force Plot** | Visualisasi tarik-menarik fitur (merah=naik, biru=turun) |
+| **Dependence Plot** | Korelasi non-linear fitur ↔ dampak SHAP (top-3 fitur) |
 
-Dashboard menampilkan **Top 3 faktor penentu** dengan narasi bahasa Indonesia dan grafik dampak horizontal.
-
-### 11.4 Cara Membaca SHAP Summary Plot
+### 12.4 Cara Membaca SHAP Summary Plot
 
 - **Sumbu Y:** Fitur diurutkan dari paling berpengaruh (atas) ke paling kecil (bawah)
 - **Sumbu X:** Nilai SHAP — positif = menaikkan prediksi, negatif = menurunkan
@@ -607,14 +649,14 @@ Dashboard menampilkan **Top 3 faktor penentu** dengan narasi bahasa Indonesia da
 
 ---
 
-## 12. Dashboard Interaktif (`dashboard.py`)
+## 13. Dashboard Interaktif (`dashboard.py`)
 
-### 12.1 Teknologi
+### 13.1 Teknologi
 - **Framework:** Streamlit
 - **Visualisasi:** Plotly (interaktif), Matplotlib (statis/SHAP)
 - **Deteksi Libur:** Library `holidays` (Indonesia)
 
-### 12.2 Tab 1: Validasi Sistem (Historis)
+### 13.2 Tab 1: Validasi Sistem (Historis)
 
 **Tujuan:** Mengevaluasi apakah model bekerja stabil pada data harian historis yang sudah diketahui.
 
@@ -625,7 +667,7 @@ Dashboard menampilkan **Top 3 faktor penentu** dengan narasi bahasa Indonesia da
 - Global SHAP: feature importance seluruh dataset
 - Penjelasan interpretatif dalam bahasa Indonesia
 
-### 12.3 Tab 2: Future Forecaster & Local XAI
+### 13.3 Tab 2: Future Forecaster & Local XAI
 
 **Tujuan:** Membuat prediksi untuk tanggal masa depan dengan input kustom.
 
@@ -644,18 +686,19 @@ Dashboard menampilkan **Top 3 faktor penentu** dengan narasi bahasa Indonesia da
 
 ---
 
-## 13. Artefak Output yang Dihasilkan
+## 14. Artefak Output yang Dihasilkan
 
-### 13.1 Model Files (`Models/`)
+### 14.1 Model Files (`Models/`)
 
-| File | Ukuran | Deskripsi |
-|:---|:---|:---|
-| `prophet_model.joblib` | ~144 KB | Model Prophet terlatih (tren + seasonality) |
-| `lgbm_model.joblib` | ~154 KB | Model LightGBM terlatih (residual corrector) |
-| `iso_forest.joblib` | ~4.5 MB | Model Isolation Forest (anomaly detector) |
-| `best_hybrid_params.json` | ~620 B | Hyperparameter terbaik + metadata tuning |
+| File | Deskripsi |
+|:---|:---|
+| `prophet_model.joblib` | Model Prophet terlatih (tren + seasonality + Avg_Temp regressor) |
+| `lgbm_model.joblib` | Model LightGBM terlatih (residual corrector, regularised) |
+| `iso_forest.joblib` | Model Isolation Forest (anomaly detector) |
+| `knn_imputer.joblib` | KNN Imputer (fitted on train data only) |
+| `best_hybrid_params.json` | 12 hyperparameter terbaik + metadata tuning |
 
-### 13.2 Dataset Files (`Outputs/`)
+### 14.2 Dataset Files (`Outputs/`)
 
 | File | Deskripsi |
 |:---|:---|
@@ -663,7 +706,7 @@ Dashboard menampilkan **Top 3 faktor penentu** dengan narasi bahasa Indonesia da
 | `dataset_monthly_processed.csv` | Dataset bulanan + makro (output `build_real_datasets.py`) |
 | `dataset_daily_with_predictions.csv` | Dataset harian + kolom prediksi (output `hybrid_model.py`) |
 
-### 13.3 Visualisasi (`Outputs/`)
+### 14.3 Visualisasi (`Outputs/`)
 
 | File | Konten |
 |:---|:---|
@@ -672,13 +715,12 @@ Dashboard menampilkan **Top 3 faktor penentu** dengan narasi bahasa Indonesia da
 | `fig2_model_comparison.png` | Bar chart MAE, RMSE, MAPE: Prophet-Only vs Hybrid |
 | `fig3_residual_distribution.png` | Histogram residual Prophet vs Hybrid (tighter = better) |
 | `fig4_shap_summary.png` | SHAP summary beeswarm plot (global feature importance) |
-| `output_xai.png` (root dir) | SHAP plot duplicate untuk dashboard |
 
 ---
 
-## 14. Cara Menjalankan Proyek
+## 15. Cara Menjalankan Proyek
 
-### 14.1 Install Dependencies
+### 15.1 Install Dependencies
 
 ```bash
 pip install -r Notebook/requirements.txt
@@ -689,7 +731,7 @@ Atau install secara manual:
 pip install pandas numpy matplotlib prophet lightgbm scikit-learn shap optuna joblib streamlit plotly holidays
 ```
 
-### 14.2 Bangun Dataset dari Raw Data
+### 15.2 Bangun Dataset dari Raw Data
 
 ```bash
 python Scripts/build_real_datasets.py
@@ -697,18 +739,18 @@ python Scripts/build_real_datasets.py
 
 Output: `Outputs/dataset_daily_processed.csv` dan `Outputs/dataset_monthly_processed.csv`
 
-### 14.3 Training Model Hybrid
+### 15.3 Training Model Hybrid
 
 ```bash
 python Scripts/hybrid_model.py
 ```
 
 **Environment variables opsional:**
-- `OPTUNA_TRIALS=50` — jumlah trial Optuna (default: 30)
-- `RETUNE_EVERY_DAYS=7` — usia maksimal parameter sebelum retune (default: 30)
-- `FORCE_RETUNE=1` — paksa retune meskipun parameter masih segar
+- `OPTUNA_TRIALS=50` — jumlah trial Optuna (default: 50)
+- `RETUNE_EVERY_DAYS=30` — usia maksimal parameter sebelum retune (default: 30)
+- `FORCE_RETUNE=True` — paksa retune meskipun parameter masih segar
 
-### 14.4 Jalankan Dashboard
+### 15.4 Jalankan Dashboard
 
 ```bash
 streamlit run dashboard.py

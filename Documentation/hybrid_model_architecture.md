@@ -9,7 +9,7 @@ Dokumen ini adalah ringkasan teknis tingkat tinggi _(High-Level Architecture)_ y
 Tidak ada satu pun model AI di dunia yang sempurna di segala kondisi. Konsumsi listrik di Indonesia dipengaruhi oleh dua poros utama yang sifatnya saling bertolak-belakang:
 
 1.  **Poros Temporal (Waktu Kalender)**: Listrik sangat patuh terhadap Jam Kerja, Hari Libur Nasional (Idul Fitri, Natal), dan Musim.
-2.  **Poros Kausalitas (Lingkungan & Makro)**: Suhu panas akibat El Nino memicu pemakaian AC ekstrem. Pertumbuhan GDP memicu pabrik baru. Varian ini tidak mengikuti tanggal, melainkan mengikuti kondisi meteorologi dan ekonomi.
+2.  **Poros Kausalitas (Lingkungan & Eksogen)**: Suhu panas akibat El Nino memicu pemakaian AC ekstrem. Perubahan curah hujan mengubah kebutuhan pendinginan. Varian ini tidak mengikuti tanggal, melainkan mengikuti kondisi meteorologi dan pola autoregresif.
 
 Pendekatan Tradisional (misal: XGBoost saja) akan kebingungan saat _"Hari Raya Idul Fitri jatuh di tanggal yang berbeda setiap tahunnya"_. Oleh karena itu, kita **memisahkan tugas (Decoupling)** ke dalam 3 Neural/Algorithmic Engine khusus:
 
@@ -19,17 +19,24 @@ Pendekatan Tradisional (misal: XGBoost saja) akan kebingungan saat _"Hari Raya I
 
 ### 1. The Forecaster: Prophet (Oleh Meta/Facebook) 📈
 
-**Tugas Utama**: Menangkap Pola Waktu, Tren Jangka Panjang, dan _Efek Kejut_ Hari Libur Nasional.
+**Tugas Utama**: Menangkap Pola Waktu, Tren Jangka Panjang, dan _Seasonality_ Musiman.
 
-- **Cara Kerja**: Prophet memecah kurva konsumsi menjadi 3 fondasi: Garis Tren (Tahunan), _Seasonality_ (Siklus Mingguan/Bulanan), dan secara spesifik diberikan input tabel **Libur Nasional Indonesia riil (2018-2024)**.
-- **Alasan Penggunaan**: Prophet secara _native_ dan mulus memahami bahwa jika besok adalah Lebaran pertama, maka konsumsi beban nasional dijamin akan terjun bebas—tidak peduli apa pun yang terjadi pada cuaca.
+- **Cara Kerja**: Prophet memecah kurva konsumsi menjadi 3 fondasi: Garis Tren (Tahunan), _Seasonality_ (Siklus Mingguan/Bulanan), dan penambahan `Avg_Temp` sebagai **exogenous regressor** untuk mengakomodasi dampak cuaca terhadap demand.
+- **Alasan Penggunaan**: Prophet secara _native_ dan mulus memahami pola kalender Indonesia. Dengan pengaturan `changepoint_prior_scale` yang sangat ketat (0.001–0.1), Prophet menghasilkan tren yang halus dan stabil — tidak terlalu fleksibel sehingga menghindari overfitting terhadap noise harian.
+- **Training**: Prophet dilatih **hanya pada data training** — tidak pernah melihat data validasi atau test. Ini memastikan Val dan Test adalah **fully out-of-sample**.
 
 ### 2. The Regressor: LightGBM (Oleh Microsoft) 🧠
 
 **Tugas Utama**: Mempelajari Residu Matematika (Kesalahan/Sisa) dari apa yang tidak bisa diprediksi oleh Prophet (Kejadian Eksternal / _Exogenous Variables_).
 
-- **Cara Kerja**: Setelah Prophet membuat kerangka dasarnya, nilai kekurangannya (_Residual_ = Aktual - Prophet) diserahkan pada algoritma pohon gradient berkinerja tinggi, LightGBM. LightGBM fokus mencocokkan anomali ini dengan parameter Cuaca (Tavg, Rainfall) dan Makroekonomi (GDP, Populasi).
-- **Alasan Penggunaan**: Kinerjanya jauh lebih cepat untuk dieksekusi dibandingkan XGBoost di lingkungan lokal (Offline), lebih sensitif terhadap angka desimal cuaca ekstrem, dan kompatibel penuh dengan SHAP Values.
+- **Cara Kerja**: Setelah Prophet membuat kerangka dasarnya, nilai kekurangannya (_Residual_ = Aktual - Prophet) diserahkan pada algoritma pohon gradient berkinerja tinggi, LightGBM. LightGBM fokus mencocokkan anomali ini dengan **18 fitur**: pola cuaca (Suhu, Curah Hujan, Temp_Lag_1), fitur autoregresif (Lag_1 s.d Lag_30, Rolling_7 s.d Rolling_30), fitur temporal (Month, DayOfYear, Trend), dan fitur kalender (Is_Weekend, Is_Holiday).
+- **Regularisasi Berat**: LightGBM dikonfigurasi dengan regularisasi berlapis untuk mencegah overfitting:
+  - **Kedalaman pohon dangkal** (`max_depth: 2–4`) — membatasi kompleksitas model.
+  - **Daun sedikit** (`num_leaves: 4–15`) — mencegah model menghafal noise.
+  - **L1/L2 penalty** (`reg_alpha` & `reg_lambda`) — menekan bobot fitur yang tidak informatif.
+  - **`extra_trees=True`** — menggunakan random split threshold untuk meningkatkan generalisasi.
+  - **`min_child_samples: 15–60`** — setiap daun harus memiliki cukup banyak data sebelum membuat keputusan.
+- **Training**: LightGBM dilatih **hanya pada data training**. Data validasi digunakan **hanya** sebagai _early-stopping monitor_ — model berhenti jika selama 50 iterasi tidak ada peningkatan pada val. Ini persis sama dengan arsitektur yang digunakan Optuna saat mencari hyperparameter.
 
 ### 3. The Guardrail (Deteksi Anomali + Imputasi): Isolation Forest 🚨
 
@@ -49,6 +56,29 @@ Sebelum masuk ke Trinitas di atas, dataset melalui sebuah palang gerbang awal un
 
 ---
 
+## 🔒 Anti-Overfitting by Design: Train-Only Architecture
+
+Arsitektur ini dirancang secara sadar untuk **menghilangkan overfitting** di setiap level:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  TRAIN-ONLY ARCHITECTURE                     │
+├─────────────────────────────────────────────────────────────┤
+│  Prophet    → dilatih HANYA pada train_df                   │
+│  LightGBM   → dilatih HANYA pada train_df                   │
+│  Val        → TIDAK pernah dilatih, hanya early-stopping    │
+│  Test       → TIDAK pernah disentuh sampai evaluasi akhir   │
+├─────────────────────────────────────────────────────────────┤
+│  DIAGNOSIS:                                                  │
+│  Train→Val gap  = Overfitting indicator                      │
+│  Val→Test gap   = Distribution Shift indicator               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Dengan desain ini, Val MAPE dan Test MAPE keduanya **fully out-of-sample** untuk kedua model. Jika Val ≈ Test, model sehat. Jika ada gap, itu murni distribution shift pada data — bukan kesalahan model.
+
+---
+
 ## 🔒 Anti-Leakage Design: Noise Stokastik & Distribusi Mulus
 
 Dataset kami menggunakan alokasi proporsional dari data tahunan BPS untuk menghasilkan target harian (`Demand_MWh`). Agar model tidak sekedar **merekayasa balik formula alokasi** (yang akan menghasilkan prediksi "terlalu sempurna" / _Target Leakage_), kami menerapkan lapisan **noise stokastik Gaussian** pada target:
@@ -64,8 +94,9 @@ Dengan total variasi ~6-8%, model dipaksa untuk **belajar generalisasi** dari po
 
 1.  _Transparent / Explainable AI_ (XAI): Model Hybrid kita bisa direntangkan menggunakan **SHAP Summary Plot**. Alih-alih berupa _"Kotak Hitam" (Black-Box)_ seperti Autoencoder (Deep Learning), kita bisa membuktikan kepada juri: _"Di tanggal 12 Mei, suhu 35C berkontribusi +12% beban, sedangkan kelembapan menyumbang -2% beban"_.
 2.  _Robustness_ terhadap _Shift_ Tanggal Hijriah/Sistem Penanggalan Lunar.
-3.  _Anti-Leakage by Design_: Noise stokastik mencegah model menghafal formula internal, memastikan generalisasi yang jujur dan realistis.
-4.  Desainnya sangat efisien dan seluruh set model dilatih **100% Offline (Lokal)** menggunakan _Laptop_ standard, menjadikannya sistem yang berdaya tahan tinggi jika server pemerintahan/cloud putus akses.
+3.  _Anti-Overfitting by Design_: Arsitektur train-only dengan regularisasi berlapis (L1/L2, extra_trees, shallow trees) memastikan model tidak menghafal data training.
+4.  _Anti-Leakage by Design_: Noise stokastik mencegah model menghafal formula internal, memastikan generalisasi yang jujur dan realistis.
+5.  Desainnya sangat efisien dan seluruh set model dilatih **100% Offline (Lokal)** menggunakan _Laptop_ standard, menjadikannya sistem yang berdaya tahan tinggi jika server pemerintahan/cloud putus akses.
 
 ---
 
