@@ -120,6 +120,9 @@ required_param_keys = {
     'num_leaves',
     'subsample',
     'colsample_bytree',
+    'min_child_samples',
+    'reg_alpha',
+    'reg_lambda'
 }
 
 def load_saved_params(path):
@@ -180,15 +183,20 @@ df_prophet_val_proxy = val_df[['Date', 'Avg_Temp']].rename(columns={'Date': 'ds'
 def objective(trial):
     # 1. Suggest joint parameters
     contamination = trial.suggest_float('contamination', 0.001, 0.05, log=True)
-    cps = trial.suggest_float('changepoint_prior_scale', 0.01, 1.0, log=True)
-    sps = trial.suggest_float('seasonality_prior_scale', 0.1, 10.0, log=True)
-    n_cp = trial.suggest_int('n_changepoints', 25, 50)
+    cps = trial.suggest_float('changepoint_prior_scale', 0.001, 0.1, log=True)
+    sps = trial.suggest_float('seasonality_prior_scale', 0.01, 1.0, log=True)
+    n_cp = trial.suggest_int('n_changepoints', 5, 20)
     
-    lgb_lr = trial.suggest_float('learning_rate', 0.005, 0.15, log=True)
-    lgb_depth = trial.suggest_int('max_depth', 4, 10)
-    lgb_leaves = trial.suggest_int('num_leaves', 31, 127)
-    lgb_subsample = trial.suggest_float('subsample', 0.6, 1.0)
-    lgb_colsample = trial.suggest_float('colsample_bytree', 0.6, 1.0)
+    lgb_lr = trial.suggest_float('learning_rate', 0.001, 0.05, log=True)
+    lgb_depth = trial.suggest_int('max_depth', 2, 4)
+    lgb_leaves = trial.suggest_int('num_leaves', 4, 15)
+    lgb_subsample = trial.suggest_float('subsample', 0.4, 0.8)
+    lgb_colsample = trial.suggest_float('colsample_bytree', 0.4, 0.8)
+    
+    # New Regularization Parameters
+    lgb_min_child = trial.suggest_int('min_child_samples', 15, 60)
+    lgb_reg_alpha = trial.suggest_float('reg_alpha', 0.01, 10.0, log=True)
+    lgb_reg_lambda = trial.suggest_float('reg_lambda', 0.01, 10.0, log=True)
     
     # 2. Anomaly Detection + Imputation (IQR + Isolation Forest)
     #    Instead of removing anomalous rows (which creates holes),
@@ -241,7 +249,8 @@ def objective(trial):
     lgb_model = lgb.LGBMRegressor(
         learning_rate=lgb_lr, max_depth=lgb_depth, num_leaves=lgb_leaves, 
         subsample=lgb_subsample, colsample_bytree=lgb_colsample,
-        n_estimators=2000, random_state=42, n_jobs=-1, verbose=-1
+        min_child_samples=lgb_min_child, reg_alpha=lgb_reg_alpha, reg_lambda=lgb_reg_lambda,
+        n_estimators=800, random_state=42, n_jobs=-1, verbose=-1, extra_trees=True
     )
     
     lgb_model.fit(
@@ -347,12 +356,13 @@ plt.savefig(anomaly_plot_path, dpi=300)
 plt.close()
 print(f"   Saved Anomaly Visualization: {anomaly_plot_path}")
 
-# 2. Final Prophet Training (with temperature regressor)
-#    Train on train+val combined for maximum data exposure to the test set
-df_prophet_full = pd.concat([
-    train_df_clean[['Date', target_col, 'Avg_Temp']],
-    val_df[['Date', target_col, 'Avg_Temp']]
-]).rename(columns={'Date': 'ds', target_col: 'y'})
+# 2. Final Prophet Training (train-only, no val/test exposure)
+#    Mirrors Optuna's evaluation: Prophet sees ONLY training data.
+#    Val and Test are both fully out-of-sample.
+print("   Training Final Prophet (train-only)...")
+df_prophet_train = train_df_clean[['Date', target_col, 'Avg_Temp']].rename(
+    columns={'Date': 'ds', target_col: 'y'}
+)
 prophet_model = Prophet(
     yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False,
     changepoint_prior_scale=best_p['changepoint_prior_scale'], 
@@ -360,41 +370,39 @@ prophet_model = Prophet(
     n_changepoints=best_p['n_changepoints']
 )
 prophet_model.add_regressor('Avg_Temp')
-prophet_model.fit(df_prophet_full)
+prophet_model.fit(df_prophet_train)
 
+# ONE Prophet model → predictions for ALL splits
 for split_df in [train_df_clean, train_df, val_df, test_df]:
     future = split_df[['Date', 'Avg_Temp']].rename(columns={'Date': 'ds'})
     split_df['Prophet_Pred'] = prophet_model.predict(future)['yhat'].values
 
-# 3. Final LightGBM Training (Residual Correction)
-#    Train on train+val combined for maximum data exposure.
-#    Use last 15% of combined set as early-stopping signal.
+# 3. Final LightGBM Training (train-only, val as held-out early-stop)
+#    Mirrors Optuna exactly: LightGBM trains on train residuals,
+#    validates on val residuals. Neither model has seen val or test.
 train_df_clean['Prophet_Residual'] = train_df_clean[target_col] - train_df_clean['Prophet_Pred']
 train_df['Prophet_Residual'] = train_df[target_col] - train_df['Prophet_Pred']
 val_df['Prophet_Residual'] = val_df[target_col] - val_df['Prophet_Pred']
 test_df['Prophet_Residual'] = test_df[target_col] - test_df['Prophet_Pred']
 
-# Combine train + val for final model
-final_train = pd.concat([train_df_clean, val_df]).reset_index(drop=True)
-es_cutoff = int(len(final_train) * 0.85)
-final_train_main = final_train.iloc[:es_cutoff]
-final_train_es   = final_train.iloc[es_cutoff:]
-
-X_train_final = final_train_main[features]
-y_train_final = final_train_main['Prophet_Residual']
-X_es = final_train_es[features]
-y_es = final_train_es['Prophet_Residual']
+X_train_final = train_df_clean[features]
+y_train_final = train_df_clean['Prophet_Residual']
+X_val = val_df[features]
+y_val = val_df['Prophet_Residual']
 
 model_lgb = lgb.LGBMRegressor(
     learning_rate=best_p['learning_rate'], max_depth=best_p['max_depth'], 
     num_leaves=best_p['num_leaves'], subsample=best_p['subsample'], 
     colsample_bytree=best_p['colsample_bytree'],
-    n_estimators=10000, random_state=42, n_jobs=-1, verbose=-1
+    min_child_samples=best_p['min_child_samples'], 
+    reg_alpha=best_p['reg_alpha'], 
+    reg_lambda=best_p['reg_lambda'],
+    n_estimators=800, random_state=42, n_jobs=-1, verbose=-1, extra_trees=True
 )
 
 model_lgb.fit(
     X_train_final, y_train_final,
-    eval_set=[(X_es, y_es)],
+    eval_set=[(X_val, y_val)],
     callbacks=[
         lgb.early_stopping(stopping_rounds=50, verbose=False),
         lgb.log_evaluation(period=0)
@@ -417,39 +425,79 @@ def calc_mape(actual, predicted):
     mask = actual != 0
     return np.mean(np.abs((actual[mask] - predicted[mask]) / actual[mask])) * 100
 
-# --- Prophet-Only Metrics ---
-prophet_rmse_val  = np.sqrt(mean_squared_error(val_df['Demand_MWh'], val_df['Prophet_Pred']))
-prophet_mape_val  = calc_mape(val_df['Demand_MWh'].values, val_df['Prophet_Pred'].values)
-prophet_mae_val   = mean_absolute_error(val_df['Demand_MWh'], val_df['Prophet_Pred'])
+# --- Prophet-Only Metrics (per split) ---
+prophet_mae_train  = mean_absolute_error(train_df['Demand_MWh'], train_df['Prophet_Pred'])
+prophet_rmse_train = np.sqrt(mean_squared_error(train_df['Demand_MWh'], train_df['Prophet_Pred']))
+prophet_mape_train = calc_mape(train_df['Demand_MWh'].values, train_df['Prophet_Pred'].values)
 
+prophet_mae_val  = mean_absolute_error(val_df['Demand_MWh'], val_df['Prophet_Pred'])
+prophet_rmse_val = np.sqrt(mean_squared_error(val_df['Demand_MWh'], val_df['Prophet_Pred']))
+prophet_mape_val = calc_mape(val_df['Demand_MWh'].values, val_df['Prophet_Pred'].values)
+
+prophet_mae_test  = mean_absolute_error(test_df['Demand_MWh'], test_df['Prophet_Pred'])
 prophet_rmse_test = np.sqrt(mean_squared_error(test_df['Demand_MWh'], test_df['Prophet_Pred']))
 prophet_mape_test = calc_mape(test_df['Demand_MWh'].values, test_df['Prophet_Pred'].values)
-prophet_mae_test  = mean_absolute_error(test_df['Demand_MWh'], test_df['Prophet_Pred'])
 
-# --- Hybrid (Prophet + LightGBM) Metrics ---
-hybrid_rmse_val  = np.sqrt(mean_squared_error(val_df['Demand_MWh'], val_df['Final_Pred']))
-hybrid_mape_val  = calc_mape(val_df['Demand_MWh'].values, val_df['Final_Pred'].values)
-hybrid_mae_val   = mean_absolute_error(val_df['Demand_MWh'], val_df['Final_Pred'])
+# --- Hybrid (Prophet + LightGBM) Metrics (per split) ---
+hybrid_mae_train  = mean_absolute_error(train_df['Demand_MWh'], train_df['Final_Pred'])
+hybrid_rmse_train = np.sqrt(mean_squared_error(train_df['Demand_MWh'], train_df['Final_Pred']))
+hybrid_mape_train = calc_mape(train_df['Demand_MWh'].values, train_df['Final_Pred'].values)
 
+hybrid_mae_val  = mean_absolute_error(val_df['Demand_MWh'], val_df['Final_Pred'])
+hybrid_rmse_val = np.sqrt(mean_squared_error(val_df['Demand_MWh'], val_df['Final_Pred']))
+hybrid_mape_val = calc_mape(val_df['Demand_MWh'].values, val_df['Final_Pred'].values)
+
+hybrid_mae_test  = mean_absolute_error(test_df['Demand_MWh'], test_df['Final_Pred'])
 hybrid_rmse_test = np.sqrt(mean_squared_error(test_df['Demand_MWh'], test_df['Final_Pred']))
 hybrid_mape_test = calc_mape(test_df['Demand_MWh'].values, test_df['Final_Pred'].values)
-hybrid_mae_test  = mean_absolute_error(test_df['Demand_MWh'], test_df['Final_Pred'])
 
-print("\n" + "=" * 72)
+print("\n" + "=" * 82)
 print("  MODEL COMPARISON: Prophet-Only vs Hybrid (Prophet + LightGBM)")
-print("=" * 72)
-print(f"{'Metric':<12} | {'Prophet-Only (Val)':<22} | {'Hybrid (Val)':<22}")
-print("-" * 72)
-print(f"{'MAE':<12} | {prophet_mae_val:>18,.2f} MWh | {hybrid_mae_val:>18,.2f} MWh")
-print(f"{'RMSE':<12} | {prophet_rmse_val:>18,.2f} MWh | {hybrid_rmse_val:>18,.2f} MWh")
-print(f"{'MAPE':<12} | {prophet_mape_val:>17.2f}%     | {hybrid_mape_val:>17.2f}%")
-print("-" * 72)
-print(f"{'Metric':<12} | {'Prophet-Only (Test)':<22} | {'Hybrid (Test)':<22}")
-print("-" * 72)
-print(f"{'MAE':<12} | {prophet_mae_test:>18,.2f} MWh | {hybrid_mae_test:>18,.2f} MWh")
-print(f"{'RMSE':<12} | {prophet_rmse_test:>18,.2f} MWh | {hybrid_rmse_test:>18,.2f} MWh")
-print(f"{'MAPE':<12} | {prophet_mape_test:>17.2f}%     | {hybrid_mape_test:>17.2f}%")
-print("=" * 72)
+print("=" * 82)
+print(f"{'Metric':<12} | {'Prophet-Only (Train)':<22} | {'Hybrid (Train)':<22} | Note")
+print("-" * 82)
+print(f"{'MAE':<12} | {prophet_mae_train:>18,.2f} MWh | {hybrid_mae_train:>18,.2f} MWh | In-sample")
+print(f"{'RMSE':<12} | {prophet_rmse_train:>18,.2f} MWh | {hybrid_rmse_train:>18,.2f} MWh |")
+print(f"{'MAPE':<12} | {prophet_mape_train:>17.2f}%     | {hybrid_mape_train:>17.2f}%     |")
+print("-" * 82)
+print(f"{'Metric':<12} | {'Prophet-Only (Val)':<22} | {'Hybrid (Val)':<22} | Note")
+print("-" * 82)
+print(f"{'MAE':<12} | {prophet_mae_val:>18,.2f} MWh | {hybrid_mae_val:>18,.2f} MWh | Out-of-sample")
+print(f"{'RMSE':<12} | {prophet_rmse_val:>18,.2f} MWh | {hybrid_rmse_val:>18,.2f} MWh |")
+print(f"{'MAPE':<12} | {prophet_mape_val:>17.2f}%     | {hybrid_mape_val:>17.2f}%     |")
+print("-" * 82)
+print(f"{'Metric':<12} | {'Prophet-Only (Test)':<22} | {'Hybrid (Test)':<22} | Note")
+print("-" * 82)
+print(f"{'MAE':<12} | {prophet_mae_test:>18,.2f} MWh | {hybrid_mae_test:>18,.2f} MWh | Out-of-sample")
+print(f"{'RMSE':<12} | {prophet_rmse_test:>18,.2f} MWh | {hybrid_rmse_test:>18,.2f} MWh |")
+print(f"{'MAPE':<12} | {prophet_mape_test:>17.2f}%     | {hybrid_mape_test:>17.2f}%     |")
+print("=" * 82)
+
+# Diagnostic: Overfitting vs Distribution Shift
+overfit_gap = hybrid_mape_val - hybrid_mape_train  # Train vs Val = overfitting signal
+shift_gap   = hybrid_mape_test - hybrid_mape_val   # Val vs Test  = distribution shift signal
+
+print(f"\n  >> Hybrid Train MAPE: {hybrid_mape_train:.2f}%")
+print(f"  >> Hybrid Val MAPE:   {hybrid_mape_val:.2f}%")
+print(f"  >> Hybrid Test MAPE:  {hybrid_mape_test:.2f}%")
+print(f"\n  >> Train→Val Gap:  {overfit_gap:.2f}pp  (Overfitting indicator)")
+print(f"  >> Val→Test Gap:   {shift_gap:.2f}pp  (Distribution Shift indicator)")
+
+# Overfitting diagnosis (Train vs Val)
+if overfit_gap < 1.0:
+    print("  >> OVERFIT CHECK:  ✅ Healthy — model generalises well from train to unseen val.")
+elif overfit_gap < 2.5:
+    print("  >> OVERFIT CHECK:  ⚠️  Mild overfitting — consider stronger regularisation.")
+else:
+    print("  >> OVERFIT CHECK:  ❌ Significant overfitting — model memorises training data.")
+
+# Distribution shift diagnosis (Val vs Test)
+if shift_gap < 0.5:
+    print("  >> SHIFT CHECK:    ✅ Stable — val and test periods have similar demand patterns.")
+elif shift_gap < 2.0:
+    print("  >> SHIFT CHECK:    ⚠️  Moderate distribution shift — test period differs from val.")
+else:
+    print("  >> SHIFT CHECK:    ❌ Large distribution shift — demand patterns changed significantly.")
 
 rmse_improvement = ((prophet_rmse_test - hybrid_rmse_test) / prophet_rmse_test) * 100
 mape_improvement = ((prophet_mape_test - hybrid_mape_test) / prophet_mape_test) * 100
