@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualisasi Arsitektur Hybrid AI</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px;
+            margin: 0;
+        }
+        .container {
+            background-color: #1e293b;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+            width: 90%;
+            max-width: 1000px;
+        }
+        h1 {
+            color: #38bdf8;
+            margin-bottom: 10px;
+        }
+        p {
+            color: #94a3b8;
+            margin-bottom: 30px;
+        }
+        .mermaid {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .footer {
+            margin-top: 20px;
+            font-size: 0.8rem;
+            color: #64748b;
+        }
+    </style>
+</head>
+<body>
+    <h1>Arsitektur Pipeline Hybrid AI</h1>
+    <p>Visualisasi alur data dari Input hingga Prediksi Final menggunakan sistem Hybrid Prophet + LightGBM.</p>
+
+    <div class="container">
+        <div class="mermaid">
+            flowchart TD
+                Start([Mulai: Raw Data]) --> Ingest[Ingest Data: Demand, Weather, Date]
+                
+                subgraph Preprocessing [1. Preprocessing Stage]
+                    Ingest --> Split[Split Data: 70% Train, 15% Val, 15% Test]
+                    Split --> Train[Train Set]
+                    Split --> Val[Validation Set]
+                    Split --> Test[Test Set]
+                    
+                    Train --> KNNFit[Fit KNN Imputer]
+                    KNNFit --> KNNApply[Apply KNN Imputation to all sets]
+                    KNNApply --> FeatEng[Feature Engineering: Lags, Rolling, Temporal]
+                end
+
+                FeatEng --> Optuna{Optuna Optimization?}
+                
+                subgraph Tuning [2. Bayesian Optimization Layer]
+                    Optuna -- Ya --> Bayesian[Joint Bayesian Search: Optimize Prophet & LGBM Params]
+                    Bayesian --> BestParams[Save Best Parameters]
+                    Optuna -- Tidak --> BestParams
+                end
+
+                BestParams --> Guardrail[3. Guardrail: Anomaly Management]
+                
+                subgraph Anomaly [Anomaly Detection & Imputation]
+                    Guardrail --> IsoForest[Isolation Forest + IQR Detection]
+                    IsoForest --> AnomalyCheck{Data Anomali?}
+                    AnomalyCheck -- Ya --> Impute[Targeted Imputation: 7-Day Rolling Mean]
+                    AnomalyCheck -- Tidak --> Clean[Clean Dataset ready for Training]
+                    Impute --> Clean
+                end
+
+                subgraph HybridModel [4. Sequential Hybrid Model]
+                    Clean --> ProphetTrainer[Prophet Engine: Baseline trend + Seasonality + Weather]
+                    ProphetTrainer --> ProphetPred[Prophet Baseline Prediction]
+                    
+                    Clean --> CalcResid[Calculate Residuals: Actual - Prophet_Pred]
+                    ProphetPred -.-> CalcResid
+                    
+                    CalcResid --> LGBMTrainer[LightGBM Engine: Learn Residual Signal / Errors]
+                    LGBMTrainer --> LGBMPred[LGBM Correction Value]
+                end
+
+                subgraph Assembly [5. Final Output & Evaluation]
+                    ProphetPred --> Sum[Summation: Σ]
+                    LGBMPred --> Sum
+                    Sum --> FinalPred([Final Prediction: Demand MWh])
+                    
+                    FinalPred --> Eval[Evaluation: RMSE, MAE, MAPE]
+                    FinalPred --> XAI[Explainable AI: SHAP Summary Plot]
+                end
+
+                %% Styling
+                style Start fill:#f9f,stroke:#333
+                style FinalPred fill:#9f9,stroke:#333
+                style Bayesian fill:#c9f,stroke:#333
+                style IsoForest fill:#f66,stroke:#333
+                style ProphetTrainer fill:#f96,stroke:#333
+                style LGBMTrainer fill:#69f,stroke:#333
+        </div>
+    </div>
+
+    <div class="footer">
+        Dihasilkan secara otomatis oleh AI Assistant &bull; 2026
+    </div>
+
+    <script>
+        mermaid.initialize({ startOnLoad: true, theme: 'default' });
+    </script>
+</body>
+</html>
