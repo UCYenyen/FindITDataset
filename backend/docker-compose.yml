@@ -2,9 +2,8 @@ version: '3.8'
 
 services:
   api:
-    build:
-      context: ..
-      dockerfile: backend/Dockerfile
+    image: ghcr.io/ucyenyen/finditdataset:${IMAGE_TAG:-latest}
+    pull_policy: always
     container_name: findit_backend
     restart: unless-stopped
     env_file:
