@@ -516,6 +516,9 @@ joblib.dump(iso_forest, os.path.join(models_dir, 'iso_forest.joblib'))
 print(f"   Models saved to: {models_dir}")
 
 # Save predictions CSV for the dashboard (combine all splits)
+train_df["Split"] = "train"
+val_df["Split"] = "val"
+test_df["Split"] = "test"
 df_all = pd.concat([train_df, val_df, test_df]).sort_values('Date').reset_index(drop=True)
 df_all.rename(columns={'Final_Pred': 'Hybrid_Prediction'}, inplace=True)
 predictions_path = os.path.join(output_dir, 'dataset_daily_with_predictions.csv')
