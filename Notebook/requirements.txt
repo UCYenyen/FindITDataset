@@ -7,3 +7,4 @@ optuna
 matplotlib
 shap
 joblib
+cmdstanpy<1.3.0
