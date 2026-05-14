@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: findit_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+    expose:
+      - "8000"
+    networks:
+      - global_proxy
+
+networks:
+  global_proxy:
+    external: true

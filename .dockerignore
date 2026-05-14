@@ -1,0 +1,13 @@
+# Ignore everything by default
+**
+
+# Allow specific directories that the backend needs
+!backend/
+!Models/
+!Outputs/
+
+# Ignore things inside backend that we don't need in the image
+backend/.venv/
+backend/__pycache__/
+backend/.env
+backend/.env.example

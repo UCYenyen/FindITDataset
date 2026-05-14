@@ -40,18 +40,27 @@ def get_historical(start: date | None = None, end: date | None = None) -> list[d
     ]
 
 
-def get_future_forecast(days: int = 7) -> list[dict]:
+def get_future_forecast(days: int = 7, start_date: date | None = None) -> list[dict]:
     """Generate N-day-ahead forecast using Prophet + LightGBM residual."""
     df = store.predictions_df
-    last_date = df["Date"].max()
+    
+    if start_date:
+        first_date = pd.Timestamp(start_date)
+        future_dates = [first_date + timedelta(days=i) for i in range(days)]
+        
+        # Use last known feature values as proxy (before the anchor date)
+        past_rows = df[df["Date"] < first_date]
+        last_row = past_rows.iloc[-1] if not past_rows.empty else df.iloc[-1]
+    else:
+        last_date = df["Date"].max()
+        future_dates = [last_date + timedelta(days=i + 1) for i in range(days)]
+        last_row = df.iloc[-1]
 
-    future_dates = [last_date + timedelta(days=i + 1) for i in range(days)]
     future_df = _build_prophet_input(future_dates)
 
     prophet_forecast = store.prophet.predict(future_df)
 
-    # Use last known feature values as proxy (real impl would feed live exogenous data)
-    last_row = df.iloc[-1]
+    # feature_template uses proxy from last_row
     feature_template = {f: last_row[f] for f in store.features}
 
     results = []

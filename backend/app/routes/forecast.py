@@ -19,8 +19,11 @@ def historical(
 
 
 @router.get("/forecast/future", response_model=list[ForecastPoint])
-def future(days: int = Query(7, ge=1, le=90)):
-    return forecast_svc.get_future_forecast(days)
+def future(
+    days: int = Query(7, ge=1),
+    start_date: date | None = Query(None)
+):
+    return forecast_svc.get_future_forecast(days, start_date=start_date)
 
 
 @router.post("/forecast/whatif", response_model=WhatIfResponse)
